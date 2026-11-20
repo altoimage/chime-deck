@@ -1,0 +1,20 @@
+{
+  "label": "Google Cloud TTS",
+  "description": "Google Cloud's Text-to-Speech API, which answers base64 audio inside a JSON reply.",
+  "method": "POST",
+  "path": "/v1/text:synthesize",
+  "base_url": "https://texttospeech.googleapis.com",
+  "headers": {"Content-Type": "application/json"},
+  "auth": {"style": "header", "name": "X-Goog-Api-Key"},
+  "body_kind": "json",
+  "body": {
+    "input": {"text": "{text}"},
+    "voice": {"languageCode": "{language}", "name": "{voice}"},
+    "audioConfig": {"audioEncoding": "MP3"}
+  },
+  "response": "json:audioContent",
+  "format": "mp3",
+  "paid": true,
+  "cost_per_1k_chars_usd": 0.016,
+  "pricing_note": "estimate, Google Cloud standard voices; the provider record can override it with your own plan's price"
+}

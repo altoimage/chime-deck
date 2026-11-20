@@ -1,0 +1,16 @@
+{
+  "label": "Custom",
+  "description": "A provider you describe yourself: the request shape below is a starting point, and every field is yours to fill in.",
+  "method": "POST",
+  "path": "/v1/audio/speech",
+  "base_url": null,
+  "headers": {"Content-Type": "application/json"},
+  "auth": {"style": "none"},
+  "body_kind": "json",
+  "body": {"text": "{text}"},
+  "response": "audio",
+  "format": "mp3",
+  "paid": false,
+  "cost_per_1k_chars_usd": null,
+  "pricing_note": "estimate only — no price is set, so a synthesis reports its cost as unknown until the provider record sets one"
+}

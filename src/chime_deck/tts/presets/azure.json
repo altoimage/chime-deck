@@ -1,0 +1,19 @@
+{
+  "label": "Azure Speech",
+  "description": "Microsoft's Azure Speech service, posting SSML to the region endpoint you supply.",
+  "method": "POST",
+  "path": "/cognitiveservices/v1",
+  "base_url": null,
+  "headers": {
+    "Content-Type": "application/ssml+xml",
+    "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3"
+  },
+  "auth": {"style": "header", "name": "Ocp-Apim-Subscription-Key"},
+  "body_kind": "text",
+  "body": "<speak version='1.0' xml:lang='{language}'><voice name=\"{voice}\">{text}</voice></speak>",
+  "response": "audio",
+  "format": "mp3",
+  "paid": true,
+  "cost_per_1k_chars_usd": 0.016,
+  "pricing_note": "estimate, Azure Speech standard voices; the provider record can override it with your own plan's price"
+}

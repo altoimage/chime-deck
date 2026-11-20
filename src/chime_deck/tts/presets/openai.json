@@ -1,0 +1,21 @@
+{
+  "label": "OpenAI",
+  "description": "OpenAI's hosted text-to-speech service, speaking through the tts-1 model.",
+  "method": "POST",
+  "path": "/v1/audio/speech",
+  "base_url": "https://api.openai.com",
+  "headers": {"Content-Type": "application/json"},
+  "auth": {"style": "bearer"},
+  "body_kind": "json",
+  "body": {
+    "model": "tts-1",
+    "input": "{text}",
+    "voice": "{voice}",
+    "response_format": "mp3"
+  },
+  "response": "audio",
+  "format": "mp3",
+  "paid": true,
+  "cost_per_1k_chars_usd": 0.015,
+  "pricing_note": "estimate, OpenAI standard tier; the provider record can override it with your own plan's price"
+}

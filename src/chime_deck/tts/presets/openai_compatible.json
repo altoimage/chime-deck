@@ -1,0 +1,21 @@
+{
+  "label": "OpenAI-compatible server",
+  "description": "A self-hosted or third-party server that speaks OpenAI's audio/speech request, such as Kokoro.",
+  "method": "POST",
+  "path": "/v1/audio/speech",
+  "base_url": null,
+  "headers": {"Content-Type": "application/json"},
+  "auth": {"style": "bearer"},
+  "body_kind": "json",
+  "body": {
+    "model": "tts-1",
+    "input": "{text}",
+    "voice": "{voice}",
+    "response_format": "mp3"
+  },
+  "response": "audio",
+  "format": "mp3",
+  "paid": false,
+  "cost_per_1k_chars_usd": 0.0,
+  "pricing_note": "estimate of zero, because a self-hosted server bills nothing per character; the provider record can override it"
+}
