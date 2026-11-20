@@ -1,0 +1,122 @@
+/*
+ * Global base styles. All colour comes from tokens.css — no hex values here.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100dvh;
+  background: var(--bg);
+}
+
+body {
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--text-body);
+  line-height: 1.5;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+/*
+ * Focus is always visible — :focus-visible only (never bare :focus), and
+ * outline is never removed anywhere without a replacement.
+ */
+*:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+/*
+ * Dashboard route: the wall panel owns the viewport. Lock the page so the
+ * browser never adds a scrollbar or rubber-band behind the app's own internal
+ * scroller (see Dashboard.svelte's `.content`).
+ */
+html[data-layout='dashboard'],
+html[data-layout='dashboard'] body {
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html[data-layout='dashboard'] body {
+  touch-action: manipulation;
+}
+
+/*
+ * Kiosk appliance rules: a panel is a display, not a document. Text is not
+ * selectable and a long-press must not raise the iOS callout. The settings
+ * route is not a kiosk route, so the `::selection` styling above still applies
+ * there.
+ */
+html[data-kiosk='true'],
+html[data-kiosk='true'] * {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/*
+ * Idle cursor: `KioskChrome` sets `data-cursor="hidden"` on <html> after a few
+ * seconds without input and removes it on the next pointer/key activity.
+ */
+html[data-cursor='hidden'],
+html[data-cursor='hidden'] * {
+  cursor: none !important;
+}
+
+/*
+ * Reduced motion: zero the motion tokens AND guard universally. Svelte's
+ * transition:/animate: directives use the Web Animations API, which CSS
+ * cannot disable — so no component may import svelte/transition or
+ * svelte/animate; components animate with CSS custom-property transitions
+ * only and must stay correct with a 0ms duration.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

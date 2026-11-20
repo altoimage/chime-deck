@@ -1,0 +1,91 @@
+/*
+ * Design tokens — single source of truth for colour, size and motion.
+ * Dark palette lives on :root (the default; a wall panel must never flash
+ * white at night). The light palette lives in exactly one
+ * :root[data-theme='light'] block — no second @media copy of the same
+ * colours. color-scheme is set per block.
+ *
+ * Design-doc errata (design 05 §1), fixed here and recorded in the ticket:
+ *  1. --tap is 48px, not the doc's 44px — D26 requires 48px minimum targets.
+ *  2. --text-label floor is 16px, not the doc's 14px — no text below 16px.
+ *  3. --state-off replaced: the doc's #6b7683 is only 3.70:1 on --surface.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* palette (dark) */
+  --bg: #0e1116;
+  --surface: #171c23;
+  --surface-hover: #1f2630; /* hover only ever adds this tint */
+  --text: #e8edf4;
+  --text-muted: #8b98a8;
+  --border: #26303c; /* decorative separators only (~1.3:1) */
+  --control-border: #64717e; /* interactive outlines; ≥3:1 vs bg/surface/hover */
+  /* --accent is configurable. The Appearance ticket must re-validate any
+     user-chosen accent against --accent-contrast at runtime (≥4.5:1). */
+  --accent: #4f9cf9;
+  --accent-contrast: #0e1116; /* 6.7:1 on --accent */
+  --state-ok: #3ddc84;
+  --state-warn: #ffb020;
+  --state-alert: #ff5c5c;
+  /* errata 3: doc value #6b7683 is 3.70:1 on --surface; replaced. */
+  --state-off: #7d8896;
+  --focus-ring: #4f9cf9; /* = accent */
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  /* sizes (D26 touch rules) */
+  --tap: 48px; /* errata 1: doc says 44px; D26 requires 48px */
+  --tap-primary: 56px;
+  --gap: 16px;
+  --gap-sm: 8px;
+  --radius: 18px;
+  --radius-sm: 10px;
+  --border-width: 1px;
+  --focus-ring-width: 3px;
+  --focus-ring-offset: 2px;
+  --thumb: 32px;
+
+  /* motion — a hint, never a show (120–200ms) */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --ease: cubic-bezier(0.2, 0.6, 0.3, 1);
+
+  /* layering */
+  --z-sticky: 10; /* shell bar above in-panel sticky content, below sheets and toasts */
+  --z-sheet: 20;
+  --z-toast: 30;
+
+  /* shadows */
+  --shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.45);
+
+  /* fonts + type scale — no text token below 16px anywhere */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, monospace; /* numerals line up */
+  --text-hero: clamp(28px, 5vw, 56px);
+  --text-state: clamp(20px, 3vw, 34px);
+  --text-title: clamp(20px, 2.2vw, 26px);
+  /* errata 2: doc floor is 14px; the D26 floor is 16px. */
+  --text-label: clamp(16px, 1.6vw, 18px);
+  --text-body: clamp(16px, 1.4vw, 18px);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f6f8fa;
+  --surface: #ffffff;
+  --surface-hover: #eaeef3;
+  --text: #0e1116;
+  --text-muted: #4a5563;
+  --border: #d5dde8; /* decorative separators only */
+  --control-border: #77828f;
+  --accent: #1866c4; /* configurable — see the dark block's note */
+  --accent-contrast: #ffffff; /* 5.7:1 on --accent */
+  --state-ok: #0f7a45;
+  --state-warn: #8a5a00;
+  --state-alert: #c2261f;
+  --state-off: #616c79;
+  --focus-ring: #1866c4; /* = accent */
+  --scrim: rgba(14, 17, 22, 0.45);
+}

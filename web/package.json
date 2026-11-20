@@ -1,0 +1,38 @@
+{
+  "name": "chime-deck-ui",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:gallery": "node scripts/check-gallery.mjs",
+    "check:storyboard": "node scripts/check-storyboard.mjs",
+    "check:dist": "node scripts/check-dist.mjs",
+    "check:dist-stale": "node scripts/check-dist-stale.mjs",
+    "gen:icons": "node scripts/generate-mdi-manifest.mjs",
+    "verify": "npm run check && npm run check:contrast && npm run check:gallery && npm run check:storyboard && npm test && npm run build && npm run check:dist && npm run check:dist-stale",
+    "test": "vitest run",
+    "test:browser": "playwright test",
+    "soak": "node browser/soak.mjs"
+  },
+  "devDependencies": {
+    "@mdi/js": "^7.4.47",
+    "@mdi/svg": "7.4.47",
+    "@playwright/test": "^1.65.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tsconfig/svelte": "^5.0.9",
+    "happy-dom": "^21.0.4",
+    "svelte": "^5.57.3",
+    "svelte-check": "^4.7.8",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
