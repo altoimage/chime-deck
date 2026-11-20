@@ -1,0 +1,503 @@
+---
+# Release: one tagged commit in, multi-arch images on GHCR, a wheel, an sdist and a GitHub
+# release out. docs/releasing.md is the operator-facing version of this file; if you change
+# the behaviour here, change that page in the same commit.
+#
+# The registry org is NOT hardcoded anywhere in this repository. HSD-40xt deliberately refused
+# to invent an `org.opencontainers.image.source`/`url` label, and this file keeps that promise:
+# `env.REGISTRY` + `env.IMAGE_REPO` below, plus `github.repository_owner` lower-cased, are the
+# ONLY place an image path is spelled out. Point them somewhere else and the whole workflow
+# follows. See the `metadata` job for the single line that composes the path.
+name: release
+
+on:
+  # Tags only: `git tag v0.2.0 && git push origin v0.2.0` is the release act.
+  push:
+    tags: ['v*']
+  # Manual runs exist for two reasons and both are load-bearing. Dispatched on a TAG ref it
+  # re-runs a real release, which is how a release whose `images` job died half way gets
+  # retried without deleting and re-pushing the tag. Dispatched on a BRANCH ref it is a dry
+  # run: every check, the wheel smoke and both image smokes run, but nothing is pushed and no
+  # release is created.
+  workflow_dispatch:
+
+# There is deliberately NO `push: branches:` trigger. This project is still taking shape, and
+# a branch trigger would spin up two emulated arm64 container builds per commit forever. The
+# green-tree gate belongs on every commit and it is a separate ticket; a release workflow that
+# fires on every commit would just be an expensive, ignored status check.
+permissions:
+  contents: read
+
+# Serialise releases by ref. `cancel-in-progress: false` is intentional: cancelling a release
+# mid-`build-push-action` can leave a partially-pushed multi-arch tag behind, and a half
+# published version is worse than a slow queue.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REGISTRY: ghcr.io
+  # The repository part of the image path is the pyproject.toml project name in lower case,
+  # NOT `${{ github.repository }}`. This repo is `ChimeDeck` and GHCR rejects upper-case
+  # repository names outright, so deriving the image name from the GitHub repo slug would fail
+  # the push with a confusing 403. `chime-deck` is what `[project] name` says — lower-cased,
+  # it is what `docker pull ghcr.io/<owner>/chime-deck:<version>` promises in docs/releasing.md.
+  IMAGE_REPO: chime-deck
+
+jobs:
+  # ---------------------------------------------------------------------------------------
+  # Resolve the release identity once, so no other job can disagree about what is being built.
+  # ---------------------------------------------------------------------------------------
+  metadata:
+    name: metadata
+    runs-on: ubuntu-24.04
+    # Ten minutes is generous for a checkout plus one Python one-liner. It exists so a wedged
+    # runner cannot hold the release queue for the default 6 hours.
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      publish: ${{ steps.identity.outputs.publish }}
+      image_repo: ${{ steps.identity.outputs.image_repo }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: resolve version, tag, publish flag and image path
+        id: identity
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_REPO: ${{ env.IMAGE_REPO }}
+        run: |
+          set -euo pipefail
+
+          # `python3` on ubuntu-24.04 is 3.12, so tomllib is in the standard library and
+          # reading the version needs no dependency and no `uv` step of its own.
+          pyproject_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+            version="${tag#v}"
+            publish=true
+
+            # The tag, the wheel version and the CHIMEDECK_VERSION image label must all
+            # say the same thing. This is the failure mode worth a hard stop: a mismatch ships
+            # images labelled 0.1.0 under a v0.2.0 tag, and the label is the only thing an
+            # operator can inspect after the fact. tests pin the wheel version, `image-smoke`
+            # pins the label, so this comparison is what ties them to the tag.
+            if [ "$pyproject_version" != "$version" ]; then
+              echo "::error::tag '$tag' implies version '$version' but pyproject.toml says '$pyproject_version'. Bump [project] version in pyproject.toml to '$version' (and commit it) before tagging: the wheel version, the image label and the release tag must agree."
+              exit 1
+            fi
+          else
+            # A dispatch on a branch is a dry run. Build the version from pyproject.toml, smoke
+            # everything, publish nothing.
+            tag=""
+            version="$pyproject_version"
+            publish=false
+            echo "::notice::workflow_dispatch on a non-tag ref ('$REF_NAME'): dry run, version '$version' from pyproject.toml. No image is pushed and no release is created."
+          fi
+
+          # The owner MUST be lower-cased: this repository's owner is mixed case (`Insanemal`)
+          # and GHCR rejects upper-case path components. `${OWNER,,}` is bash 4+ and this runs
+          # on ubuntu-24.04, so it is always available.
+          image_repo="$REGISTRY/${OWNER,,}/$IMAGE_REPO"
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "image_repo=$image_repo"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "version=$version tag='$tag' publish=$publish image=$image_repo"
+
+  # ---------------------------------------------------------------------------------------
+  # The same gate every developer runs, exactly as AGENTS.md lists it.
+  # ---------------------------------------------------------------------------------------
+  checks:
+    name: python checks
+    needs: metadata
+    runs-on: ubuntu-24.04
+    # ruff + mypy + pytest on a cold uv cache is a couple of minutes; 25 is slack for a slow
+    # cache miss and still short enough that a hung runner surfaces the same working day.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          python-version: '3.11'
+          # The action auto-disables its cache on tag pushes (release events are excluded from
+          # its automatic caching), and a tag push is exactly when this workflow runs. Set it
+          # explicitly so the cache is real instead of silently off; the cache is keyed on
+          # uv.lock, so this is a build-speed knob, not a correctness one.
+          enable-cache: true
+
+      # A release must never publish from a red tree. These are the four commands AGENTS.md
+      # lists under "Verification commands", unchanged — a release that skips them publishes
+      # whatever happened to be on the tag.
+      - name: uv sync
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run --frozen --no-sync ruff check .
+
+      - name: ruff format --check
+        run: uv run --frozen --no-sync ruff format --check .
+
+      - name: mypy
+        run: uv run --frozen --no-sync mypy src
+
+      - name: pytest
+        run: uv run --frozen --no-sync pytest
+
+  # ---------------------------------------------------------------------------------------
+  # Frontend: the tree that must be identical to what the wheel ships.
+  # ---------------------------------------------------------------------------------------
+  frontend:
+    name: frontend checks
+    needs: metadata
+    runs-on: ubuntu-24.04
+    # npm ci + svelte-check + vitest + vite build + bundle checks. 25 minutes covers a cold
+    # npm cache with room to spare.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The stale-dist check reasons about the committed tree — it rebuilds `web/dist` and
+          # compares it with what git says is committed there. Give it the full repository
+          # state rather than depending on how a shallow clone happens to look.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          # Matches the `node:22-slim` stage in the Dockerfile, so the bundle this job verifies
+          # is the bundle the image would build. Verified by hand: node 22 and node 26 both
+          # reproduce the committed `web/dist` byte-for-byte, so pinning 22 cannot make the
+          # staleness check flaky — but pin it anyway, because "the runner's current node"
+          # is not a thing a release should depend on.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+
+      - name: npm run verify
+        working-directory: web
+        run: npm run verify
+
+      # `verify` already ends with `check:dist-stale`, so this is deliberately redundant: it gives
+      # the staleness check its own named step, so a release that fails because someone edited
+      # `web/src` and forgot `npm run build` says so in the job list instead of hiding inside
+      # `verify`'s output. Without the check at all, the release would happily package last
+      # week's UI under this week's version.
+      - name: npm run check:dist-stale
+        working-directory: web
+        run: npm run check:dist-stale
+
+  # ---------------------------------------------------------------------------------------
+  # The Python distribution — and proof that an installed copy actually serves the dashboard.
+  # ---------------------------------------------------------------------------------------
+  wheel:
+    name: wheel + sdist
+    needs: [metadata, frontend]
+    runs-on: ubuntu-24.04
+    # `uv build` is fast; the install-and-serve smoke creates a fresh venv and boots the server,
+    # which is the part that needs headroom.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          python-version: '3.11'
+          enable-cache: true
+
+      # `uv build` builds the sdist and then the wheel FROM that sdist, so a wheel that builds
+      # here is provably buildable from the sdist we publish. The sdist carries the committed
+      # `web/dist` (it is not git-ignored), and pyproject's hatch `force-include` maps it into
+      # the wheel at `chime_deck/static`.
+      - name: uv build
+        run: uv build
+
+      # A cheap, human-readable echo of the packaging assertion, so a failure says "the wheel
+      # has no index.html" in one line instead of burying it in the smoke script's output.
+      - name: assert the wheel ships the built UI
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < <(ls dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one wheel in dist/, found ${#wheels[@]}"
+            exit 1
+          fi
+          # Listed to a file rather than piped into `grep -q`: grep exits as soon as it matches,
+          # which SIGPIPEs unzip and fails the step under `pipefail`. Listing first also means
+          # the assertion failure shows the whole archive next to it.
+          unzip -l "${wheels[0]}" > wheel-contents.txt
+          cat wheel-contents.txt
+          if ! grep -q 'chime_deck/static/index.html$' wheel-contents.txt; then
+            echo "::error::${wheels[0]} does not contain chime_deck/static/index.html — the built UI was not packaged"
+            exit 1
+          fi
+
+      # The ticket note is explicit: "release must verify the wheel actually ships the built UI
+      # and that an installed copy serves the dashboard". The unzip above is a listing; this is
+      # the behavioural proof — clean venv, install the wheel, boot the server from site-packages
+      # and assert the root path returns the real app shell. It is the same script an operator
+      # can run locally, so CI and a human do not diverge.
+      - name: install-and-serve smoke test
+        env:
+          PYTHON_VERSION: '3.11'
+        run: bash scripts/wheel-smoke.sh dist/
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          # v4+ artifacts are immutable: this name can never be reused by another job in this
+          # run or by a later run of the same workflow, which is why it names the content
+          # rather than the run.
+          name: python-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------
+  # The multi-arch images. Two legs: the default `runtime` tag and the shipped `:piper` tag.
+  # ---------------------------------------------------------------------------------------
+  images:
+    name: image ${{ matrix.target }}
+    needs: [metadata, checks, frontend]
+    runs-on: ubuntu-24.04
+    # Two emulated arm64 builds (a full apt layer and a pex/uv resolve each) plus the amd64
+    # builds on the same runner. 120 minutes is what that costs with a cold GHA cache; it is
+    # also the point at which something is wrong rather than slow.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      # Only what a registry push needs. `contents: read` stays because the job checks out code
+      # and `build-push-action` reads the Dockerfile and build context.
+      packages: write
+    strategy:
+      # One leg failing is information about that leg; killing the other leg mid-push just
+      # leaves a half-published release to clean up.
+      fail-fast: false
+      matrix:
+        target: [runtime, piper]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # `linux/arm64` on an amd64 runner needs binfmt_misc registration, which the hosted image
+      # does not ship. Without this the arm64 half of the manifest list fails with an exec-format
+      # error at the first RUN.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+
+      # The default `docker` driver cannot build multi-platform images (Docker 28 refuses with
+      # "multiple platforms feature is currently not supported"); a `docker-container` builder
+      # is required and this action creates one.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: log in to the registry
+        if: needs.metadata.outputs.publish == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: compute the tags for this leg
+        id: tags
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          IMAGE: ${{ needs.metadata.outputs.image_repo }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            runtime)
+              tags="$IMAGE:$VERSION"
+              # `latest` only moves for a plain X.Y.Z release. A pre-release (`0.2.0-rc1`) gets
+              # its own tag and nothing else, so nobody's `:latest` pull silently becomes an rc.
+              if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                tags="$tags,$IMAGE:latest"
+              fi
+              ;;
+            piper)
+              # `:piper` is a shipped deliverable, not a convenience. HSD-40xt made that image
+              # real and put its GPL notice in its own labels; a release that quietly stopped
+              # publishing it would break the documented opt-in (`docs/installing.md`
+              # "Local Piper in Docker") with no error anywhere.
+              tags="$IMAGE:$VERSION-piper,$IMAGE:piper"
+              ;;
+            *)
+              echo "::error::unknown image target '$TARGET'"
+              exit 1
+              ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "this leg tags: $tags"
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          # Without this every published image is labelled `dev` — the Dockerfile's default for
+          # local builds — and `org.opencontainers.image.version` becomes a lie on the artefact
+          # operators inspect. UID/GID are deliberately NOT passed: the image default 1000 is the
+          # right shipped default, and a release must not encode the runner's uid.
+          build-args: |
+            CHIMEDECK_VERSION=${{ needs.metadata.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+          # A dry run builds everything and pushes nothing. `publish` is 'true' only for a tag.
+          push: ${{ needs.metadata.outputs.publish == 'true' }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+  # ---------------------------------------------------------------------------------------
+  # Smoke the artefact that was actually produced: the published manifest list on a real pull,
+  # or the locally built single-platform image on a dry run.
+  # ---------------------------------------------------------------------------------------
+  image-smoke:
+    name: image smoke ${{ matrix.target }}
+    needs: [metadata, images]
+    runs-on: ubuntu-24.04
+    # A pull of ~600 MB plus container start and a handful of HTTP assertions. 60 minutes is the
+    # bound that catches a wedged daemon rather than a slow network.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # `packages: write` is needed here too: GHCR denies the anonymous pull of a private
+      # package, and it is the same token either way.
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [runtime, piper]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Needed only by the dry-run leg below, which builds locally and `--load`s the result.
+      # No QEMU: the smoke runs the native amd64 image on the amd64 runner.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: log in to the registry
+        if: needs.metadata.outputs.publish == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish leg: pull the very tag we just pushed. This is the only step that proves the
+      # multi-arch index is pullable and that the amd64 manifest inside it is the one we built —
+      # `docker pull` on an amd64 host selects the amd64 manifest out of the index automatically,
+      # so no `--platform` is needed.
+      - name: pull the published image
+        if: needs.metadata.outputs.publish == 'true'
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          IMAGE: ${{ needs.metadata.outputs.image_repo }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = "piper" ]; then
+            ref="$IMAGE:$VERSION-piper"
+          else
+            ref="$IMAGE:$VERSION"
+          fi
+          docker pull "$ref"
+          echo "REF=$ref" >> "$GITHUB_ENV"
+
+      # Dry-run leg: nothing was pushed, so build the same target for amd64 only and load it into
+      # the local daemon. Same script, same assertions — a dry run that skipped the smoke would
+      # defeat the point of being able to dry-run a release.
+      - name: build a local single-platform image
+        if: needs.metadata.outputs.publish != 'true'
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          ref="chime-deck:$TARGET-smoke"
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            -t "$ref" \
+            --target "$TARGET" \
+            --build-arg CHIMEDECK_VERSION="$VERSION" \
+            .
+          echo "REF=$ref" >> "$GITHUB_ENV"
+
+      # Asserts the app shell is served from inside the image, the asset URL resolves, and — via
+      # EXPECTED_VERSION — that the image label and /api/health agree with the release version.
+      # On the piper leg REQUIRE_PIPER additionally proves `import piper` works, because the whole
+      # reason that tag exists is the local TTS engine.
+      - name: smoke the image
+        env:
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
+          REQUIRE_PIPER: ${{ matrix.target == 'piper' && '1' || '' }}
+        run: bash scripts/image-smoke.sh "$REF"
+
+  # ---------------------------------------------------------------------------------------
+  # Only after everything above passed: publish the GitHub release.
+  # ---------------------------------------------------------------------------------------
+  release:
+    name: github release
+    needs: [metadata, wheel, images, image-smoke]
+    if: needs.metadata.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    # Downloading two small files and one API call. 15 minutes is the "gh is stuck" bound.
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # Checkout first: `actions/checkout` cleans the workspace, and it would delete an
+      # already-downloaded `dist/` along with it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-dist
+          path: dist
+
+      - name: generate SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum ./*.whl ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # The Dockerfile is deliberately NOT attached: it lives in the repository and its
+          # content is fixed by the tag. The compose file IS attached, because it is the
+          # consumer-facing way to run the image and it contains the `image:` line an operator
+          # has to fill in with their own owner path.
+          assets=(dist/*.whl dist/*.tar.gz deploy/docker-compose.yml dist/SHA256SUMS)
+
+          # Idempotent by construction: a re-run of a release that failed during this job must
+          # upload over the existing assets, not die on "release already exists".
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists — uploading assets with --clobber"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            # `--verify-tag` refuses to invent a tag, so the release always points at a tag that
+            # a human pushed on purpose. `--generate-notes` uses GitHub's own commit/PR notes;
+            # writing release notes by hand is a later ticket.
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" "${assets[@]}"
+          fi
