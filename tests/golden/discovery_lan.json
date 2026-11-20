@@ -1,0 +1,23 @@
+{
+  "name": "Front Door Chime",
+  "unique_id": "chime_deck_default_front-door",
+  "command_topic": "chime_deck/default/button/front-door/set",
+  "payload_press": "PRESS",
+  "icon": "mdi:doorbell",
+  "availability_topic": "chime_deck/default/availability",
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "qos": 0,
+  "retain": false,
+  "entity_category": "config",
+  "device": {
+    "identifiers": [
+      "chime_deck_default"
+    ],
+    "name": "ChimeDeck",
+    "manufacturer": "ChimeDeck",
+    "model": "Chime & Status Panel",
+    "sw_version": "@VERSION@",
+    "configuration_url": "http://192.168.0.50:8080/settings"
+  }
+}

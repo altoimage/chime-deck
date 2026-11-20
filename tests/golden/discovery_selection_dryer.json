@@ -1,0 +1,21 @@
+{
+  "name": "Dryer selected",
+  "unique_id": "chime_deck_default_dryer_selected",
+  "default_entity_id": "binary_sensor.chime_deck_dryer",
+  "state_topic": "chime_deck/default/selection/dryer",
+  "payload_on": "on",
+  "payload_off": "off",
+  "icon": "mdi:gesture-tap-button",
+  "availability_topic": "chime_deck/default/availability",
+  "payload_available": "online",
+  "payload_not_available": "offline",
+  "device": {
+    "identifiers": [
+      "chime_deck_default"
+    ],
+    "name": "ChimeDeck",
+    "manufacturer": "ChimeDeck",
+    "model": "Chime & Status Panel",
+    "sw_version": "@VERSION@"
+  }
+}
