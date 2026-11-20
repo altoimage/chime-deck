@@ -224,3 +224,9 @@ started, and end with `wheel-smoke: OK` / `image-smoke: OK`.
   the first time it boots on that architecture.
 
 Release provenance and signable artefacts, if the project wants them, are their own ticket.
+
+> **Gotcha — do not start a workflow file with `---`.** A YAML document marker at the top of
+> `.github/workflows/*.yml` is valid YAML (PyYAML and `actionlint` both accept it), but GitHub will
+> silently **not register the workflow**: it never appears in the Actions tab or the API, and
+> `gh workflow run` answers `HTTP 404: workflow … not found on the default branch`. The file must
+> begin with `name:`. This cost an afternoon once.

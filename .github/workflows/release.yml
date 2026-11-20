@@ -1,4 +1,3 @@
----
 # Release: one tagged commit in, multi-arch images on GHCR, a wheel, an sdist and a GitHub
 # release out. docs/releasing.md is the operator-facing version of this file; if you change
 # the behaviour here, change that page in the same commit.
