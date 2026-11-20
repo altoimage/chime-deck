@@ -1,0 +1,45 @@
+# ruff hooks run from ruff-pre-commit's own environment (rev below) and mypy and
+# pytest from the project environment; keep both in sync with uv.lock.  --frozen
+# stops a hook run from silently re-resolving and rewriting the committed lock.
+exclude: ^\.pi/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # The built UI in web/dist/ is a committed build artifact. Rewriting it
+      # here would leave the tree disagreeing with `npm run build` (trailing
+      # whitespace can even sit inside minified string literals), so the two
+      # mutating fixers skip it. check-added-large-files still guards it.
+      - id: trailing-whitespace
+        exclude: ^web/dist/
+      - id: end-of-file-fixer
+        exclude: ^web/dist/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run --frozen mypy
+        language: system
+        pass_filenames: false
+        files: \.(py|toml)$
+        require_serial: true
+      - id: pytest
+        name: pytest
+        entry: uv run --frozen pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true

@@ -1,0 +1,34 @@
+# Keep the build context to the source tree only.
+#
+# Project_state/ holds the private architecture and design docs, .tickets/ holds
+# the private backlog, and data/ holds per-installation runtime state. None of
+# them may ever leak into an image, so they are excluded here and not merely
+# ignored by git.
+.git
+.github
+.pi
+.venv
+venv
+Project_state
+.tickets
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+data
+node_modules
+# The image runs its own `npm ci`, so a host tree or a previous build's output
+# must never ride `COPY web/` into the build stage. test-results, the Playwright
+# report and the browser tier's screenshots are per-run artefacts too.
+**/node_modules
+web/test-results
+web/playwright-report
+web/browser/artifacts
+# The compose bind mount is per-installation runtime state, like data/ above.
+deploy/data
+# A host-baked piper fixture must not ride `COPY tests` into an image whose
+# digests only cover /opt/piper-voices.
+tests/fixtures/piper-voices
+.env
+.env.*
