@@ -1,0 +1,23 @@
+-- ---------------------------------------------------------------------------
+-- buttons: the real container of a pre-rendered phrase (HSD-dzek).
+--
+-- baked_format  The container the artefact actually uses -- "wav", "mp3",
+--               "ogg" or "flac" -- sniffed from its leading bytes rather than
+--               assumed from the suffix that was requested, because D25 makes
+--               an external engine answer MP3 for a ".wav" request and the
+--               bytes are never transcoded. The real format is the only fact a
+--               reader can trust, and a wrong guess is a file that will not
+--               play.
+--
+-- baked_sha, baked_at and baked_error already exist in 001_initial.sql; this
+-- migration only adds the container those bakes were missing.
+--
+-- The column is appended at the end of the table because ALTER TABLE ADD COLUMN
+-- appends, which is why tests/test_store_migrations.py lists "baked_format" last
+-- in EXPECTED_COLUMNS["buttons"] rather than beside its siblings.
+--
+-- Deliberately NO index: the bake lookup is by button id (the primary key), and
+-- the pinned index set in tests/test_store_migrations.py must not change for a
+-- lookup a table of a dozen buttons never needs.
+-- ---------------------------------------------------------------------------
+ALTER TABLE buttons ADD COLUMN baked_format TEXT;

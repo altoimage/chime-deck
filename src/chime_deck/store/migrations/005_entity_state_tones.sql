@@ -1,0 +1,31 @@
+-- ---------------------------------------------------------------------------
+-- entities: the per-tile state→tone mapping and its colour opt-out (HSD-d5x2).
+--
+-- state_tones    A JSON object of raw Home Assistant state string → tone, where
+--                tone is one of "ok", "warn", "alert" or "off". These are
+--                *explicit overrides only*: the built-in default table lives in
+--                chime_deck.icons.tones, so a release can improve it without
+--                a data migration. NULL therefore means "no explicit overrides"
+--                and is not the same as an empty object, which means a user
+--                cleared a mapping that once existed. Keys are stored verbatim
+--                and matched case-sensitively; "unavailable" and "unknown" are
+--                never mapped, because a tone is a claim about a state and
+--                "unavailable" is the absence of one.
+--
+-- colour_by_state  The per-tile opt-out: 1 colours the tile from its state, 0
+--                renders it neutral in every state while the word still carries
+--                the state. It is NOT NULL with a default of 1, so every row
+--                written before this migration colours its tile exactly as it
+--                did before.
+--
+-- Both columns are appended at the end of the table because ALTER TABLE ADD
+-- COLUMN appends, which is why tests/test_store_migrations.py lists
+-- "state_tones" and "colour_by_state" last in EXPECTED_COLUMNS["entities"]
+-- rather than beside their siblings.
+--
+-- Deliberately NO index: a tile's tones are read with the row, looked up by
+-- primary key, and the table holds a handful of rows. An index here would force
+-- the pinned index set in tests/test_store_migrations.py to change for no gain.
+-- ---------------------------------------------------------------------------
+ALTER TABLE entities ADD COLUMN state_tones TEXT;
+ALTER TABLE entities ADD COLUMN colour_by_state INTEGER NOT NULL DEFAULT 1;

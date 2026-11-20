@@ -1,0 +1,22 @@
+-- ---------------------------------------------------------------------------
+-- press_log: the measured TTS synthesis time of the press itself (HSD-c9ke).
+--
+-- synthesis_ms Milliseconds the press's own TTS synthesis took, as measured by
+--            the engine that produced it. The press path writes it when it
+--            renders a clip; design 04 §4 surfaces the figure in the press log.
+--
+-- NULL is a success state, not a failure: nothing was synthesised for that
+-- press, which is exactly what a cache hit, a bake hit, a sound button, a
+-- failed press, or an engine that keeps no measurement (``ha_tts``,
+-- ``espeak_ng``) all look like. It is never a stand-in for zero -- zero would be
+-- a real measurement at millisecond resolution.
+--
+-- The playback worker does NOT write this column: it has no synthesis to
+-- report. The press path owns it, unlike ``duration_ms`` and ``latency_ms``,
+-- which the worker fills in once playback starts.
+--
+-- Deliberately NO index: press_log is capped at 1000 rows, so a lookup here
+-- would scan a table that is already tiny. An index would force the pinned
+-- index set in tests/test_store_migrations.py to change for no gain.
+-- ---------------------------------------------------------------------------
+ALTER TABLE press_log ADD COLUMN synthesis_ms INTEGER;
