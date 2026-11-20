@@ -1,0 +1,95 @@
+# Run ChimeDeck in Docker.
+#
+# Docker is SUPPORTED, NOT RECOMMENDED. The native install in docs/installing.md
+# is ten minutes and needs no Docker, and every difficult part of running this in
+# a container is host-specific:
+#
+#   * audio passthrough — /dev/snd plus the audio group on a plain ALSA host, or
+#     the Pulse/PipeWire socket and a host-specific UID (the commented block at
+#     the end of the service);
+#   * UID mapping — ./data is a bind mount, so the container user must be the
+#     host user that owns it;
+#   * the kiosk browser cannot live in the container — Chromium needs the host's
+#     display, seat and DRM devices. Run the kiosk on the host (docs/kiosk.md)
+#     and point it at http://127.0.0.1:8080.
+#
+# Project_state/design/06-deployment.md §6 is the design this file implements;
+# docs/installing.md §11 is the operator-facing version of the same caveats.
+name: chime-deck
+
+services:
+  doorbell:
+    # This file builds from the repository root Dockerfile, because it cannot know which
+    # owner you pull from. The release workflow publishes multi-arch images on every `v*`
+    # tag; to use one, replace `image:` with the published tag
+    # (ghcr.io/<your-owner>/chime-deck:<version>) and delete `build:`.
+    # docs/releasing.md has the tag list and the pre-flight list for cutting a release.
+    image: chime-deck:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        # Match your own `id -u` / `id -g`, because ./data belongs to you and the
+        # app has to write its database there.
+        UID: "${CHIMEDECK_UID:-1000}"
+        GID: "${CHIMEDECK_GID:-1000}"
+    container_name: chime-deck
+    restart: unless-stopped
+    ports:
+      # Loopback only. The app has no authentication (D20), so the port must
+      # never be reachable from the LAN, let alone the internet.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Create this yourself, from this directory, as your own user:
+      #     mkdir -p data
+      # Docker creates a missing bind-mount source as root, and then the
+      # container's non-root user cannot write its own database.
+      - ./data:/data
+    # Plain ALSA host. Delete these two entries for the PipeWire variant below.
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      # Docker resolves this *name* against the image's /etc/group, so it means
+      # gid 29 (Debian's audio group) whatever your host calls its own — and the
+      # passed-through device nodes keep the HOST's gid. Debian 12/13, Raspberry
+      # Pi OS and Ubuntu all use 29, so the name is right there; on a host that
+      # does not (Arch uses 996), put the number from `getent group audio` here
+      # instead, or /dev/snd stays unreadable.
+      - audio
+    environment:
+      CHIMEDECK_DATA_DIR: /data
+      # In-container bind address only; the published port above is still
+      # loopback-only on the host.
+      CHIMEDECK_HOST: 0.0.0.0
+    healthcheck:
+      # GET /api/health is cheap: two in-memory values, no store, no socket.
+      # The 3 s inner timeout keeps the probe bounded even if uvicorn wedges.
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, os, urllib.request;
+          url = 'http://127.0.0.1:%s/api/health' % os.environ.get('CHIMEDECK_PORT', '8080');
+          payload = json.load(urllib.request.urlopen(url, timeout=3));
+          raise SystemExit(0 if payload.get('status') == 'ok' else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    # --- PipeWire / PulseAudio host -----------------------------------------
+    # A desktop, or a Pi running PipeWire. Replace the `devices` and `group_add`
+    # entries above with this `volumes`/`environment` pair. The UID in the paths
+    # is YOUR uid from `id -u` — it is not a constant, and that is exactly why
+    # Docker is supported rather than recommended. PULSE_SERVER is the only way
+    # libmpv finds the host's PipeWire daemon from inside the container.
+    #
+    # volumes:
+    #   - ./data:/data
+    #   - /run/user/1000/pulse:/run/user/1000/pulse
+    # environment:
+    #   CHIMEDECK_DATA_DIR: /data
+    #   CHIMEDECK_HOST: 0.0.0.0
+    #   PULSE_SERVER: unix:/run/user/1000/pulse/native

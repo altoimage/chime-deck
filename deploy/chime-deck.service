@@ -1,0 +1,103 @@
+# systemd *user* unit for ChimeDeck (design 06 §4, decision D18).
+#
+# Install (see docs/installing.md):
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/chime_deck/deploy/chime-deck.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now chime-deck
+#   loginctl enable-linger "$USER"      # mandatory: start at boot with no login
+#
+# A *user* unit, not a system unit: the speaker sockets (PipeWire/PulseAudio)
+# live in the user session. There is deliberately NO SupplementaryGroups= key.
+# Measured on systemd 262 (dev host) and on the ARM board (Armbian/Ubuntu
+# 26.04), any value in a user unit fails with status=216/GROUP ("Changing group
+# credentials failed: Operation not permitted") because setgroups() needs
+# CAP_SETGID, which a user manager does not have. The supported way to reach the
+# speaker is `sudo usermod -aG audio "$USER"` followed by restarting the user
+# manager (`loginctl terminate-user "$USER"`, or a reboot); the manager then
+# spawns this service with the audio group. Verify on the running service:
+#   systemctl --user show -p MainPID chime-deck
+#   grep ^Groups /proc/<MainPID>/status     # must contain the audio gid
+#
+# No Wants=network-online.target / After=sound.target: those are system targets
+# and a no-op in a user manager. No ordering is needed -- an unreachable MQTT
+# broker logs a warning and startup still succeeds with mqtt=ERROR.
+
+[Unit]
+Description=ChimeDeck
+Documentation=file://%h/chime_deck/docs/installing.md
+
+[Service]
+Type=simple
+WorkingDirectory=%h/chime_deck
+ExecStart=%h/chime_deck/.venv/bin/chime-deck
+Environment=CHIMEDECK_HOST=127.0.0.1
+Environment=CHIMEDECK_PORT=8080
+Environment=CHIMEDECK_DATA_DIR=%h/chime_deck/data
+
+# --- Stop path -------------------------------------------------------------
+# A clean stop is SIGTERM; uvicorn re-raises the signal, so the process can
+# surface as death by signal 15 or as exit status 143. Both are success, not a
+# crash: without this, `systemctl --user stop` records the unit as failed.
+KillSignal=SIGTERM
+SuccessExitStatus=143 SIGTERM
+
+# TimeoutStopSec bounds the WHOLE stop, derived from every bounded wait on the
+# shutdown path. Serial stages (source of truth in file:line):
+#   uvicorn graceful, in-flight handlers      1.0  cli.GRACEFUL_SHUTDOWN_TIMEOUT_S
+#   voice download jobs aclose                5.0  tts/voices.py:993,1073
+#   local Piper aclose                        0.0  tts/piper.py:536,735
+#   voice manager close                       0.0  tts/voices.py:671-677
+#   discovery stop                            0.0  mqtt/discovery.py:625-640
+#   MQTT _stop_client                         5.0  mqtt/bridge.py:840,122
+#   MQTT _drain_pending                       5.0  mqtt/bridge.py:845,1075
+#   playback worker stop                      7.0  playback.py:59,62,451
+#   audio backend stop                        2.0  playback.py:493; audio/mpv_backend.py:60
+#   state hub stop                            5.0  hub.HUB_STOP_TIMEOUT_S
+#   store close (effective busy_timeout)      5.0  store/database.py:224,129-134
+#   ------------------------------------------------------------- serial = 35.0
+# Concurrent, bounded in-flight work:
+#   espeak-ng render plus its kill grace      7.0  tts/engines.py:68,86,454
+#   ffprobe plus its kill grace               4.0  sounds/probe.py:41,44
+# Future (not in this stop path today):
+#   long-lived HA websocket client stop        5.0  ha/websocket.py:85
+# ---------------------------------------------------------------------------
+# bounded total = 35.0 + 11.0 + 5.0 = 51.0 s. ceil(1.25 * 51.0) is 64, and the
+# 75 s here is deliberately left at the value sized for the older 15 s espeak
+# budget (HSD-4y6l lowered it), so it still clears the bound with more headroom.
+# This supersedes the 5 s suggested in the ticket's batch-1 note: 5 s is shorter
+# than the chime stop alone (11 s) and would SIGKILL a process that may still
+# hold a rollback journal.
+#
+# Residual terms the application cannot bound: an in-flight local Piper render
+# and its shielded import probe own non-daemon pool threads that Python joins at
+# interpreter exit with no timeout (tts/piper.py:402,536,735); the loop's
+# default executor (asyncio.to_thread) has the same property. TimeoutStopSec is
+# the unit-level backstop for those. By the time SIGKILL can arrive the lifespan
+# finally has already run store.close() (app.py:440-445), so no WAL or rollback
+# journal is held. The engines a 1 GB panel actually uses (ha_tts, espeak_ng,
+# remote_tts, none) own no such thread.
+#
+# KillMode=mixed: give the main process the full budget to run its own bounded
+# shutdown and reap its transient ffprobe/piper children, then SIGKILL the whole
+# cgroup at the deadline. control-group would SIGTERM those children at t=0,
+# racing the app's own kill+grace path; mixed is still a cgroup-wide backstop,
+# so a wedged main process cannot leak children.
+KillMode=mixed
+TimeoutStopSec=75
+
+# A too-new database exits 78 (cli.SCHEMA_TOO_NEW_EXIT_CODE). That refusal is
+# permanent until the operator upgrades, so Restart=always must not loop every
+# 3 s on a headless panel; hold the unit failed instead.
+RestartPreventExitStatus=78
+Restart=always
+RestartSec=3
+
+# Minimal, honest hardening. Tighter sandboxing (ProtectSystem/ProtectHome,
+# PrivateDevices, RestrictAddressFamilies) is NOT enabled on purpose: it can
+# break the PipeWire/PulseAudio socket in $XDG_RUNTIME_DIR or the ALSA devices.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

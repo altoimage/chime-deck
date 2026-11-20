@@ -1,0 +1,25 @@
+# Compose wrapper for the integration harness (design 07 §2).
+#
+# Run it through scripts/test-integration.sh, which supplies the timeouts.
+name: chime-deck-integration
+
+services:
+  integration:
+    # The Dockerfile is the repo-root multi-stage file because the harness must
+    # share the runtime image's base and audio packages (HSD-8gft), so
+    # `target: integration` picks the harness stage.
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: integration
+    image: chime-deck-integration:py311
+    working_dir: /app
+    # Deliberate: the suite must need nothing but loopback. The only test that
+    # listens at all (tests/test_lifecycle.py) binds 127.0.0.1:0 in-process, so a
+    # real network requirement would fail here instead of passing quietly on a
+    # machine that happens to be online.
+    network_mode: none
+    # No environment block and no volumes on purpose. The environment lives in the
+    # Dockerfile ENV, and the image bakes the tree, so a container run is literally
+    # "the suite on the committed tree". The baked tree now also carries one
+    # checksum-verified piper fixture voice, and network_mode: none is unchanged.

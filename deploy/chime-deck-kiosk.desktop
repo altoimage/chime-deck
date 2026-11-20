@@ -1,0 +1,24 @@
+# XDG autostart entry for the ChimeDeck wall panel (Desktop image).
+#
+# Install:
+#   cp deploy/chime-deck-kiosk.desktop ~/.config/autostart/
+#
+# Exec must be a plain absolute path: desktop-file-validate rejects `sh -c`,
+# single quotes and `$HOME`. The wrapper installed by
+#   sudo install -m 755 deploy/kiosk.sh /usr/local/bin/chime-deck-kiosk
+# reads KIOSK_URL or takes a URL argument; a split deployment appends the
+# server URL to Exec, for example:
+#   Exec=/usr/local/bin/chime-deck-kiosk http://bigpc.local:8080/?kiosk=1
+
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ChimeDeck Kiosk
+Comment=Full-screen dashboard for the wall panel
+Exec=/usr/local/bin/chime-deck-kiosk
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+Categories=Utility;

@@ -1,0 +1,109 @@
+# systemd *user* unit for the ChimeDeck kiosk on a Lite image: it boots
+# to `cage`, a minimal Wayland kiosk shell, with Chromium as its only client.
+#
+# Install (see docs/kiosk.md):
+#   sudo apt install -y cage            # plus seatd on Debian/Ubuntu, below
+#   sudo install -m 755 deploy/kiosk.sh /usr/local/bin/chime-deck-kiosk
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/chime-deck-kiosk.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now chime-deck-kiosk
+#   loginctl enable-linger "$USER"      # MANDATORY: start at boot with no login
+#
+# `loginctl enable-linger` is not optional: without it the user manager only
+# exists while the user is logged in, so the kiosk would not start at boot and
+# would die on logout. Check with `loginctl show-user "$USER" -p Linger`.
+#
+# seatd: a cage session needs a seat. On the reference board (Radxa ZERO 3W,
+# Armbian/Ubuntu 26.04) the packaged /run/seatd.sock is root:video 0770, so a
+# user in the video group can take a seat from a lingering user unit. Measured,
+# not assumed; on other distributions check `ls -l /run/seatd.sock` and join
+# whichever group owns it (some packages use a dedicated _seatd group):
+#   sudo apt install -y seatd
+#   sudo systemctl enable --now seatd
+#   sudo usermod -aG video "$USER"      # then restart the user manager
+# A desktop session on a real VT also provides a seat, but that needs
+# autologin and a display manager, which a Lite image does not have.
+#
+# Documentation= is deliberately omitted: a split install may be a
+# `uv tool install` with no checkout, so a file:// path would be a lie.
+
+[Unit]
+Description=ChimeDeck kiosk (cage + Chromium)
+# Ordering only. After= on an absent unit is harmless. Deliberately no
+# Wants=: the kiosk must be able to run even if the backend is remote (D22),
+# and the wrapper's URL pre-flight handles a slow local backend.
+After=chime-deck.service
+
+[Service]
+Type=simple
+
+# Loopback by default. For a split deployment (D22) point the panel at the
+# server, for example:
+#   Environment=KIOSK_URL=http://bigpc.local:8080/?kiosk=1
+Environment=KIOSK_URL=http://127.0.0.1:8080/?kiosk=1
+
+# --cage wraps the browser in cage and gives one restarted unit. The wrapper
+# owns the Chromium flags; see deploy/kiosk.sh.
+ExecStart=/usr/local/bin/chime-deck-kiosk --cage
+
+# The wrapper exits 143 on a clean stop, which is success, not a crash.
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+SuccessExitStatus=143 SIGTERM
+
+# The wrapper gives its Chromium child 5 s to exit, then SIGKILLs it. This
+# unit timeout is the cgroup-wide backstop, not the primary grace period.
+TimeoutStopSec=15
+PrivateTmp=true
+
+# Deliberately NO NoNewPrivileges=: it breaks Chromium's sandbox, and cage
+# needs the seat and DRM devices. Do not add it back. Likewise no
+# --no-sandbox in the wrapper and no SupplementaryGroups= (which fails in a
+# user unit; use `usermod -aG video` instead).
+#
+# If the session cannot find a seat or the GPU misbehaves, these are the
+# knobs to try (uncomment one at a time):
+#   Environment=LIBSEAT_BACKEND=seatd
+#   Environment=WLR_RENDERER=pixman
+#
+# If the panel's EDID mode is unusable (e.g. 1920x1080 on a 7-inch-class
+# panel), pin the mode from inside the compositor with wlr-randr instead. This
+# needs `sudo apt install wlr-randr`; the wrapper ignores it with a warning if
+# the tool is absent. docs/kiosk.md §7 explains it.
+#   Environment=KIOSK_MODE=1280x720
+#   Environment=KIOSK_OUTPUT=HDMI-A-1   # optional; derived from wlr-randr
+#   Environment=KIOSK_MODE_WAIT=10      # optional; seconds to wait for the
+#                                       # output to come up (default 10)
+
+# If the driver refuses a later mode change, let weston pick the mode as its
+# INITIAL modeset instead of changing it after startup. Needs
+# `sudo apt install -y weston` (kiosk-shell.so ships with it). This supersedes
+# the --cage in ExecStart above; the wrapper falls back to cage with one
+# warning if weston is missing. docs/kiosk.md §7.5.
+#   Environment=KIOSK_COMPOSITOR=weston
+#   Environment=KIOSK_MODE=1280x720
+#   Environment=KIOSK_OUTPUT=HDMI-A-1   # optional; default HDMI-A-1
+
+# If the panel never comes up, read docs/kiosk.md §0 first: on a Lite image the
+# compositor has to be the only process holding /dev/dri/card0, and a desktop
+# session still running holds it as DRM master. Before launching, the wrapper
+# scans /dev/dri for another holder (ignoring itself and systemd-logind)
+# and logs ONE warning naming it -- it never refuses to start, because the
+# browser may be started inside a desktop on purpose. KIOSK_DRM_DEVICE_ROOT is
+# the directory that check scans.
+#   Environment=KIOSK_DRM_DEVICE_ROOT=/dev/dri
+
+# The wrapper then waits for the HDMI connector to report `connected` before
+# launching, and afterwards observes the display ONCE and logs what the kernel
+# reports: a `kiosk ready: ...` line, or one warning. It never tears the
+# compositor down and never exits over a display verdict -- only a compositor
+# that has exited is restarted, with the backoff in docs/kiosk.md §5. Both
+# defaults are 60 s; raise KIOSK_CONNECT_WAIT on a slow panel.
+# docs/kiosk.md §7.6.
+#   Environment=KIOSK_CONNECT_WAIT=60
+#   Environment=KIOSK_READY_WAIT=60
+
+[Install]
+WantedBy=default.target
