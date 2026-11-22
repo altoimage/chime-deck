@@ -7,11 +7,12 @@ import importlib.resources
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import httpx
 import pytest
@@ -24,11 +25,23 @@ from chime_deck import __version__
 from chime_deck.app import AppState, create_app
 from chime_deck.config import ServerConfig
 from chime_deck.entity_info import NO_LIVE_ENTITY_INFO
-from chime_deck.ha import HaEntityInfo, HomeAssistantWebSocketClient
-from chime_deck.health import HealthStatus
+from chime_deck.ha import HaEntityInfo, HaEntityState, HomeAssistantWebSocketClient
+from chime_deck.health import HealthRegistry, HealthStatus
 from chime_deck.store import ConfigStore, EntityIn
 
 pytestmark = pytest.mark.asyncio
+
+_REVOKED_HA_TOKEN: Final = "revoked-token-0123456789abcdef"
+"""A token the test peers reject; no test may log it."""
+
+_NEW_HA_TOKEN: Final = "renewed-token-fedcba9876543210"
+"""The token the test peers accept after a committed change; never logged."""
+
+_ROTATED_HA_TOKEN: Final = "rotated-token-0011223344556677"
+"""A second accepted token, used when one PATCH changes several ``ha.*`` keys."""
+
+_HA_BASE_URL: Final = "http://homeassistant.local:8123"
+"""The ``ha.base_url`` the rebuild tests seed."""
 
 
 @pytest.fixture(autouse=True)
@@ -976,3 +989,235 @@ async def test_an_injected_never_opened_client_is_closed_silently(
     ]
     assert [message for message in warnings if "Home Assistant" in message] == []
     assert [message for message in warnings if "did not stop cleanly" in message] == []
+
+
+def _ha_error_mentions_rejection(state: AppState) -> bool:
+    """Return whether the header says the stored token was rejected.
+
+    :param state: the running application's shared state.
+    """
+    if state.health.get("ha") is not HealthStatus.ERROR:
+        return False
+    detail = state.health.message().get("detail", "")
+    return "rejected" in detail or "401" in detail
+
+
+def _subscribed_after(factory: FakeHaFactory, previous: FakeHaPeer) -> FakeHaPeer | None:
+    """Return the newest peer that subscribed after *previous*, if any.
+
+    A rebuild opens a brand-new connection, so "the new peer" cannot be
+    ``connections[-1]`` at a fixed moment: the client subscribes from its own
+    supervisor task. The identity check on *previous* keeps the helper honest
+    when the factory also handed out short-lived live-data connections.
+
+    :param factory: the scripted connection factory.
+    :param previous: the peer of the generation being replaced.
+    """
+    subscribed = [
+        peer for peer in factory.connections if peer is not previous and peer.subscribed_ids()
+    ]
+    return subscribed[-1] if subscribed else None
+
+
+async def test_saving_a_new_ha_token_rebuilds_the_client_without_a_restart(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A committed ``ha.token`` change rebuilds the running client in place.
+
+    The acceptance criterion for cd-80m2: a revoked token is replaced with a good
+    one through the store's real event bus, with no restart, and the tiles resume
+    live data on the new generation.
+
+    :param tmp_path: pytest temporary directory.
+    :param caplog: captured log records.
+    """
+    config = _config(tmp_path)
+    async with ConfigStore(config.database_path) as seed:
+        await seed.set_setting("ha.base_url", _HA_BASE_URL)
+        await seed.set_setting("ha.token", _REVOKED_HA_TOKEN)
+        await seed.upsert_entity(EntityIn(entity_id="lock.front_door"))
+    factory = FakeHaFactory(partial(FakeHaPeer, accepted_tokens={_NEW_HA_TOKEN}))
+    app = create_app(
+        config, ha_websocket_factory=partial(HomeAssistantWebSocketClient, connect=factory)
+    )
+    state = cast(AppState, app.state.doorbell)
+    caplog.set_level(logging.INFO, logger="chime_deck")
+
+    async with app.router.lifespan_context(app):
+        await wait_until(lambda: _ha_error_mentions_rejection(state), timeout=5.0)
+        old_client = state.ha_websocket
+        old_peer = factory.connections[0]
+        old_live = state.live_entities
+        assert old_client is not None
+
+        # The store's own bus delivers the event; nothing here calls the handler.
+        await state.store.set_setting("ha.token", _NEW_HA_TOKEN)
+
+        assert state.ha_websocket is not old_client
+        assert old_peer.closed is True
+        assert old_client.connected is False
+        await wait_until(lambda: _subscribed_after(factory, old_peer) is not None, timeout=5.0)
+        new_peer = _subscribed_after(factory, old_peer)
+        assert new_peer is not None
+        assert new_peer.sent[0] == {"type": "auth", "access_token": _NEW_HA_TOKEN}
+        assert new_peer.subscribed_ids() == [["lock.front_door"]]
+        assert old_peer.subscribed_ids() == []
+        await wait_until(lambda: state.health.get("ha") is HealthStatus.CONNECTED, timeout=5.0)
+        assert state.live_entities is not old_live
+        assert isinstance(state.live_entities, HaEntityInfo)
+
+        # Tiles resume live data: a state pushed through the new peer reaches the hub.
+        await state.hub.flush_once()
+        audience = state.hub.register()
+        new_peer.push_states({"lock.front_door": {"s": "unlocked", "a": {}, "lc": 0}})
+        try:
+            payload = await asyncio.wait_for(state.hub.next_payload(audience), 5.0)
+        except TimeoutError:
+            pytest.fail("the hub delivered no message within 5 s after the rebuild")
+        data = cast("dict[str, object]", json.loads(payload)["data"])
+        assert data["entity_id"] == "lock.front_door"
+        assert data["state"] == "unlocked"
+
+    messages = "\n".join(_messages(caplog))
+    assert _NEW_HA_TOKEN not in messages
+    assert _REVOKED_HA_TOKEN not in messages
+
+
+async def test_saving_a_rejected_ha_token_reports_401_instead_of_keeping_the_old_client(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A new token the peer rejects closes the old client and reports the rejection.
+
+    Acceptance criterion 3: the header must say the token was rejected rather
+    than keep serving on stale credentials behind a green dot.
+
+    :param tmp_path: pytest temporary directory.
+    :param caplog: captured log records.
+    """
+    config = _config(tmp_path)
+    async with ConfigStore(config.database_path) as seed:
+        await seed.set_setting("ha.base_url", _HA_BASE_URL)
+        await seed.set_setting("ha.token", _NEW_HA_TOKEN)
+        await seed.upsert_entity(EntityIn(entity_id="lock.front_door"))
+    factory = FakeHaFactory(partial(FakeHaPeer, accepted_tokens={_NEW_HA_TOKEN}))
+    app = create_app(
+        config, ha_websocket_factory=partial(HomeAssistantWebSocketClient, connect=factory)
+    )
+    state = cast(AppState, app.state.doorbell)
+    caplog.set_level(logging.INFO, logger="chime_deck")
+
+    async with app.router.lifespan_context(app):
+        await wait_until(lambda: state.health.get("ha") is HealthStatus.CONNECTED, timeout=5.0)
+        old_client = state.ha_websocket
+        old_peer = factory.connections[0]
+        assert old_client is not None
+
+        await state.store.set_setting("ha.token", _REVOKED_HA_TOKEN)
+
+        assert state.ha_websocket is not old_client
+        assert state.ha_websocket is not None
+        assert old_peer.closed is True
+        await wait_until(lambda: _ha_error_mentions_rejection(state), timeout=5.0)
+        assert "rejected" in state.health.message().get("detail", "")
+        # The new generation is installed even though it cannot authenticate; the
+        # header, not a missing seam, is what tells the operator.
+        assert isinstance(state.live_entities, HaEntityInfo)
+
+    assert _REVOKED_HA_TOKEN not in "\n".join(_messages(caplog))
+
+
+async def test_clearing_ha_token_tears_the_client_down_without_a_restart(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``ha.token`` cleared to ``""`` stops the client and reports not configured.
+
+    :param tmp_path: pytest temporary directory.
+    :param caplog: captured log records.
+    """
+    config = _config(tmp_path)
+    async with ConfigStore(config.database_path) as seed:
+        await seed.set_setting("ha.base_url", _HA_BASE_URL)
+        await seed.set_setting("ha.token", TOKEN)
+        await seed.upsert_entity(EntityIn(entity_id="lock.front_door"))
+    factory = FakeHaFactory()
+    app = create_app(
+        config, ha_websocket_factory=partial(HomeAssistantWebSocketClient, connect=factory)
+    )
+    state = cast(AppState, app.state.doorbell)
+    caplog.set_level(logging.INFO, logger="chime_deck")
+
+    async with app.router.lifespan_context(app):
+        await wait_until(lambda: state.health.get("ha") is HealthStatus.CONNECTED, timeout=5.0)
+        old_peer = factory.connections[0]
+
+        await state.store.set_setting("ha.token", "")
+
+        assert state.ha_websocket is None
+        assert old_peer.closed is True
+        assert state.live_entities is NO_LIVE_ENTITY_INFO
+        assert state.health.get("ha") is HealthStatus.NOT_CONFIGURED
+
+
+async def test_one_settings_patch_with_both_ha_keys_rebuilds_exactly_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One ``PATCH`` that changes both ``ha.*`` keys builds exactly one new client.
+
+    The store emits one event per written key, so without the generation guard a
+    single save would rebuild twice and open and close a socket for nothing.
+
+    :param tmp_path: pytest temporary directory.
+    :param caplog: captured log records.
+    """
+    config = _config(tmp_path)
+    async with ConfigStore(config.database_path) as seed:
+        await seed.set_setting("ha.base_url", _HA_BASE_URL)
+        await seed.set_setting("ha.token", _NEW_HA_TOKEN)
+        await seed.upsert_entity(EntityIn(entity_id="lock.front_door"))
+    factory = FakeHaFactory(partial(FakeHaPeer, accepted_tokens={_NEW_HA_TOKEN, _ROTATED_HA_TOKEN}))
+    constructions: list[str] = []
+
+    def build(
+        *,
+        base_url: str,
+        token: str,
+        health: HealthRegistry,
+        on_state_change: Callable[[HaEntityState], None],
+    ) -> HomeAssistantWebSocketClient:
+        """Build one client through the real class, recording each construction.
+
+        :param base_url: the stored ``ha.base_url``.
+        :param token: the stored ``ha.token``; recorded, never logged.
+        :param health: the app's own health registry.
+        :param on_state_change: the app's state callback.
+        """
+        constructions.append(token)
+        return HomeAssistantWebSocketClient(
+            base_url=base_url,
+            token=token,
+            health=health,
+            on_state_change=on_state_change,
+            connect=factory,
+        )
+
+    app = create_app(config, ha_websocket_factory=build)
+    state = cast(AppState, app.state.doorbell)
+    caplog.set_level(logging.INFO, logger="chime_deck")
+
+    async with _running(app) as client:
+        await wait_until(lambda: state.health.get("ha") is HealthStatus.CONNECTED, timeout=5.0)
+        assert constructions == [_NEW_HA_TOKEN]
+
+        response = await client.patch(
+            "/api/settings",
+            json={
+                "ha.base_url": "http://homeassistant.lan:9123",
+                "ha.token": _ROTATED_HA_TOKEN,
+            },
+        )
+
+        assert response.status_code == 200
+        # Exact equality: the initial client plus exactly ONE rebuild.
+        assert constructions == [_NEW_HA_TOKEN, _ROTATED_HA_TOKEN]
+        await wait_until(lambda: state.health.get("ha") is HealthStatus.CONNECTED, timeout=5.0)
+        assert constructions == [_NEW_HA_TOKEN, _ROTATED_HA_TOKEN]

@@ -18,7 +18,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Protocol
 
 import httpx
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
@@ -66,7 +66,7 @@ from .ha import (
     sync_tile_ids,
     watch_tile_changes,
 )
-from .health import HealthRegistry
+from .health import HealthRegistry, HealthStatus
 from .hub import HubClient, StateHub
 from .selection import SelectionService
 from .sounds import (
@@ -94,7 +94,13 @@ from .tts import (
 )
 from .wiring import ChimePipeline, Wiring, default_wiring
 
-__all__ = ["PLACEHOLDER_HTML", "STARTUP_SCAN_BUDGET_S", "AppState", "create_app"]
+__all__ = [
+    "PLACEHOLDER_HTML",
+    "STARTUP_SCAN_BUDGET_S",
+    "AppState",
+    "HaWebSocketFactory",
+    "create_app",
+]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -333,6 +339,33 @@ async def _stop_quietly(what: str, stop: Awaitable[None]) -> None:
         _LOGGER.warning("shutdown: %s did not stop cleanly: %s: %s", what, type(exc).__name__, exc)
 
 
+class HaWebSocketFactory(Protocol):
+    """Constructs one Home Assistant websocket client for a settings generation.
+
+    This is the construction seam a *rebuild* needs: an injected client instance
+    cannot be re-created, so the lifespan calls this factory for the first client
+    and for every rebuild. A test or the browser bench passes one to keep the
+    rebuild offline while still receiving the app's own health registry and state
+    callback.
+    """
+
+    def __call__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        health: HealthRegistry,
+        on_state_change: Callable[[HaEntityState], None],
+    ) -> HomeAssistantWebSocketClient:
+        """Build a client that opens nothing until it is started.
+
+        :param base_url: the stored ``ha.base_url``.
+        :param token: the stored ``ha.token``; never logged.
+        :param health: the app's own registry, so a rebuild reports into it.
+        :param on_state_change: the hub's state callback.
+        """
+
+
 def create_app(
     config: ServerConfig,
     *,
@@ -343,6 +376,7 @@ def create_app(
     sound_client: httpx.AsyncClient | None = None,
     ha_client: httpx.AsyncClient | None = None,
     ha_websocket: HomeAssistantWebSocketClient | None = None,
+    ha_websocket_factory: HaWebSocketFactory | None = None,
     speech_engines: Sequence[TtsEngine] | None = None,
 ) -> FastAPI:
     """Build the ASGI application for *config*.
@@ -373,6 +407,15 @@ def create_app(
         factory. The lifespan then uses it instead of constructing one, and
         still starts it and closes it. ``None`` means the lifespan reads
         ``ha.base_url``/``ha.token`` and builds a real client when they are set.
+    :param ha_websocket_factory: the construction seam a *rebuild* needs — an
+        injected instance cannot be re-created. The lifespan calls it for the
+        first client and again whenever a committed ``ha.base_url``/``ha.token``
+        change must replace the running one, so a test or the browser bench keeps
+        that rebuild offline while the client still writes into the app's own
+        health registry and reports through the app's own state callback.
+        ``None`` constructs :class:`~chime_deck.ha.HomeAssistantWebSocketClient`
+        itself. ``ha_websocket`` (an instance) stays supported and is still used
+        as the first client.
     :param speech_engines: the offline injection seam for the speech engine
         list, so an API test never probes a real binary or opens a socket;
         ``None`` builds ``remote_tts``, ``ha_tts``, ``piper`` and ``espeak_ng``.
@@ -492,6 +535,11 @@ def create_app(
         ha_unsubscribe: Callable[[], None] | None = None
         auth_unsubscribe: Callable[[], None] | None = None
         settings_unsubscribe: Callable[[], None] | None = None
+        # The generation invariant: ``ha_generation`` is exactly the settings the
+        # installed client was built from, and ``None`` exactly when no client is
+        # installed. It is compared, never logged.
+        ha_generation: tuple[str, str] | None = None
+        ha_reload_lock = asyncio.Lock()
 
         async def _refresh_auth_gate(event: ConfigEvent) -> None:
             """Reload the shared token after a committed settings change.
@@ -535,74 +583,75 @@ def create_app(
                 last_changed=state.last_changed,
             )
 
-        async def _build_ha_client(
-            *, at_startup: bool
-        ) -> tuple[HomeAssistantWebSocketClient, str, bool] | None:
-            """Build the state client, or report why this install has none.
+        async def _read_ha_settings() -> tuple[str, str] | None:
+            """Return the stored ``(base_url, token)``, or ``None`` when unconfigured.
 
-            Every path logs one line and none of them mentions the token. An
-            injected client is used as it is (a test's scripted factory), a
-            stored ``ha.base_url`` plus ``ha.token`` build a real one, and
-            anything else leaves the tiles configuration-only.
+            Reads exactly the two rows the client is built from, in one place, so
+            the first client and every later rebuild agree on what "the settings"
+            means. The token is never logged.
 
-            :param at_startup: whether this runs during the boot sequence; the
-                ``True`` case keeps the ``startup: 6/7`` step wording, the
-                ``False`` case the ``home assistant:`` late-start wording.
-            :returns: the client, the stored base URL (``""`` for an injected
-                client) and whether the client was injected; ``None`` when the
-                install is unconfigured or its stored address is unusable.
+            :returns: ``(base_url, token)``; ``None`` when ``ha.base_url`` is blank
+                or no ``ha.token`` is stored, i.e. when this install has no Home
+                Assistant at all.
             :raises HaConfigurationError: if the stored token is not a string.
             """
-            injected = app_state.ha_websocket is not None
-            client = app_state.ha_websocket
-            base_url = ""
-            if client is None:
-                stored_url = await store.get_setting("ha.base_url")
-                base_url = stored_url if isinstance(stored_url, str) else ""
-                if not base_url.strip() or not await store.has_secret("ha.token"):
-                    if at_startup:
-                        _LOGGER.info(
-                            "startup: 6/7 Home Assistant is not configured; tiles show "
-                            "configuration-only icons"
-                        )
-                    else:
-                        _LOGGER.info(
-                            "home assistant: not configured yet; tiles show "
-                            "configuration-only icons"
-                        )
-                    return None
-                token = await store.get_setting("ha.token")
-                if not isinstance(token, str):
-                    raise HaConfigurationError(
-                        "the ha.token setting is not a string — add a long-lived access "
-                        "token in Settings"
-                    )
-                try:
-                    client = HomeAssistantWebSocketClient(
-                        base_url=base_url,
-                        token=token,
-                        health=health,
-                        on_state_change=_on_ha_state,
-                    )
-                except HaConfigurationError as exc:
-                    _LOGGER.warning(
-                        "%s Home Assistant is configured but unusable: %s; tiles show "
-                        "configuration-only icons until ha.base_url is fixed",
-                        "startup: 6/7" if at_startup else "home assistant:",
-                        exc,
-                    )
-                    return None
-                except Exception as exc:
-                    # Defensive: no traceback, and the same shape as the line above.
-                    _LOGGER.warning(
-                        "%s Home Assistant is configured but unusable: %s; tiles show "
-                        "configuration-only icons until ha.base_url is fixed",
-                        "startup: 6/7" if at_startup else "home assistant:",
-                        exc,
-                    )
-                    return None
-                app_state.ha_websocket = client
-            return client, base_url, injected
+            base_url = await store.get_setting("ha.base_url")
+            base_url = base_url if isinstance(base_url, str) else ""
+            if not base_url.strip() or not await store.has_secret("ha.token"):
+                return None
+            token = await store.get_setting("ha.token")
+            if not isinstance(token, str):
+                raise HaConfigurationError(
+                    "the ha.token setting is not a string — add a long-lived access "
+                    "token in Settings"
+                )
+            return base_url, token
+
+        def _construct_ha_client(
+            base_url: str, token: str, *, step: str
+        ) -> tuple[HomeAssistantWebSocketClient | None, str | None]:
+            """Build one client through the construction seam.
+
+            Every path that cannot build a client logs the same ``configured but
+            unusable`` WARNING, and no path mentions the token.
+
+            :param base_url: stored ``ha.base_url``.
+            :param token: stored ``ha.token``; never logged.
+            :param step: log prefix, ``"startup: 6/7"`` during boot or
+                ``"home assistant:"`` for a later rebuild.
+            :returns: the client and ``None``, or ``None`` and the reason these
+                settings are unusable.
+            """
+            factory: HaWebSocketFactory = (
+                ha_websocket_factory
+                if ha_websocket_factory is not None
+                else HomeAssistantWebSocketClient
+            )
+            try:
+                client = factory(
+                    base_url=base_url,
+                    token=token,
+                    health=health,
+                    on_state_change=_on_ha_state,
+                )
+            except HaConfigurationError as exc:
+                _LOGGER.warning(
+                    "%s Home Assistant is configured but unusable: %s; tiles show "
+                    "configuration-only icons until ha.base_url is fixed",
+                    step,
+                    exc,
+                )
+                return None, str(exc)
+            except Exception as exc:
+                # Defensive: no traceback, and the same shape as the line above.
+                _LOGGER.warning(
+                    "%s Home Assistant is configured but unusable: %s; tiles show "
+                    "configuration-only icons until ha.base_url is fixed",
+                    step,
+                    exc,
+                )
+                return None, str(exc)
+            return client, None
 
         async def _install_ha_watch(
             client: HomeAssistantWebSocketClient,
@@ -610,6 +659,7 @@ def create_app(
             base_url: str,
             injected: bool,
             at_startup: bool,
+            rebuilt: bool = False,
         ) -> None:
             """Subscribe the client to the tiles and install the live-data seam.
 
@@ -617,6 +667,9 @@ def create_app(
             :param base_url: stored Home Assistant address, for the log line.
             :param injected: whether the client was injected rather than built.
             :param at_startup: whether this runs during the boot sequence.
+            :param rebuilt: whether this replaces a running client after a
+                committed ``ha.base_url``/``ha.token`` change, which has its own
+                single log line instead of the late-start one.
             """
             nonlocal ha_unsubscribe
             # Installed for both branches: an injected client is a real client too,
@@ -627,7 +680,14 @@ def create_app(
             await client.start()
             app_state.live_entities = HaEntityInfo(client)
             hub.set_live_entities(app_state.live_entities, timeout_s=app_state.live_lookup_timeout)
-            if not at_startup:
+            if rebuilt:
+                _LOGGER.info(
+                    "home assistant: rebuilt the client for the new settings; watching %d "
+                    "entities at %s",
+                    len(entity_ids),
+                    base_url,
+                )
+            elif not at_startup:
                 _LOGGER.info(
                     "home assistant: configured after startup; watching %d entities at %s",
                     len(entity_ids),
@@ -652,27 +712,59 @@ def create_app(
             the token. An injected client is used as it is (a test's scripted
             factory), a stored ``ha.base_url`` plus ``ha.token`` build a real
             one, and anything else leaves the tiles configuration-only.
+
+            :raises HaConfigurationError: if the stored token is not a string; the
+                startup failure handling owns that, exactly as before.
             """
-            built = await _build_ha_client(at_startup=True)
-            if built is None:
+            nonlocal ha_generation
+            if app_state.ha_websocket is not None:
+                # An injected client (a test or the bench) is used as it is. Its
+                # credentials are not necessarily the store's, so the generation
+                # it stands for is the store's settings *if they can be read*; a
+                # malformed stored token must not fail this startup.
+                try:
+                    ha_generation = await _read_ha_settings()
+                except HaConfigurationError:
+                    ha_generation = None
+                await _install_ha_watch(
+                    app_state.ha_websocket, base_url="", injected=True, at_startup=True
+                )
                 return
-            client, base_url, injected = built
-            await _install_ha_watch(client, base_url=base_url, injected=injected, at_startup=True)
+            settings = await _read_ha_settings()
+            if settings is None:
+                _LOGGER.info(
+                    "startup: 6/7 Home Assistant is not configured; tiles show "
+                    "configuration-only icons"
+                )
+                return
+            client, _reason = _construct_ha_client(*settings, step="startup: 6/7")
+            if client is None:
+                return
+            # Assigned before the install so a failure there still leaves the
+            # client owned by the lifespan, which closes it at shutdown.
+            app_state.ha_websocket = client
+            await _install_ha_watch(client, base_url=settings[0], injected=False, at_startup=True)
+            ha_generation = settings
 
-        async def _start_ha_after_settings(event: ConfigEvent) -> None:
-            """Start Home Assistant when its address and token arrive after startup.
+        async def _apply_ha_settings(event: ConfigEvent) -> None:
+            """Rebuild, start or stop the websocket client for a committed settings change.
 
-            This is what makes the first-run wizard work without a restart: a
-            user who stores ``ha.base_url`` and ``ha.token`` after the server is
-            already serving gets a real client plus the ``ENTITIES_CHANGED``
-            watcher, so a tile added afterwards is watched immediately.
+            This is what makes the first-run wizard work without a restart *and*
+            what makes a committed ``ha.base_url``/``ha.token`` change take effect
+            in place: the old client is torn down first, then one new client is
+            built from the settings as they now stand. Keeping the old client
+            would silently keep old credentials, which is the exact lie this path
+            exists to prevent.
 
             The ``try``/``except`` is required: this is an ``EventBus`` subscriber,
             so a failure must be logged here instead of being raised into
-            ``publish``.
+            ``publish``. The lock collapses the one-event-per-key burst of a single
+            ``PATCH /api/settings``, and the generation guard drops the rest: a
+            second event that resolves to the installed generation does nothing.
 
             :param event: committed configuration change, from the store's bus.
             """
+            nonlocal ha_generation, ha_unsubscribe
             if event.name is not ConfigEventName.SETTINGS_CHANGED:
                 return
             keys = event.payload.get("keys", ())
@@ -680,21 +772,78 @@ def create_app(
                 return
             if "ha.base_url" not in keys and "ha.token" not in keys:
                 return
-            if app_state.ha_websocket is not None:
-                # Deliberately no rebuild of an already-started client: URL and
-                # token edits during a live session are a separate ticket.
-                return
             try:
-                built = await _build_ha_client(at_startup=False)
-                if built is None:
-                    return
-                client, base_url, injected = built
-                await _install_ha_watch(
-                    client, base_url=base_url, injected=injected, at_startup=False
-                )
+                async with ha_reload_lock:
+                    failure: str | None = None
+                    try:
+                        settings = await _read_ha_settings()
+                    except HaConfigurationError as exc:
+                        # A token that is not a string is a *failed* rebuild, not an
+                        # exception out of this subscriber: the old client still has
+                        # to go, and the header has to say why.
+                        settings = None
+                        failure = str(exc)
+                    if ha_generation is not None and settings == ha_generation:
+                        return
+                    if failure is None and ha_generation is None and settings is None:
+                        # No client installed and none configured: a repeated event
+                        # has nothing to do. A failure is never swallowed here: it
+                        # still has to reach the header.
+                        return
+                    # Torn down first, so the old client's ``stop()`` health write
+                    # cannot clobber the new client's final status.
+                    if ha_unsubscribe is not None:
+                        ha_unsubscribe()
+                        ha_unsubscribe = None
+                    if app_state.ha_websocket is not None:
+                        await app_state.ha_websocket.aclose()
+                        app_state.ha_websocket = None
+                    app_state.live_entities = NO_LIVE_ENTITY_INFO
+                    hub.set_live_entities(NO_LIVE_ENTITY_INFO)
+                    ha_generation = None
+                    if settings is None:
+                        if failure is not None:
+                            health.set("ha", HealthStatus.ERROR, detail=failure)
+                            _LOGGER.warning(
+                                "home assistant: the stored settings are unusable: %s", failure
+                            )
+                            return
+                        health.set(
+                            "ha",
+                            HealthStatus.NOT_CONFIGURED,
+                            detail="home assistant is no longer configured; tiles show "
+                            "configuration-only icons",
+                        )
+                        _LOGGER.info(
+                            "home assistant: no longer configured; tiles show "
+                            "configuration-only icons"
+                        )
+                        return
+                    client, reason = _construct_ha_client(*settings, step="home assistant:")
+                    if client is None:
+                        # Unlike the MQTT reload, which keeps the running bridge, an
+                        # unusable ``ha.*`` change must not keep the old client:
+                        # keeping it would silently keep old credentials.
+                        health.set(
+                            "ha",
+                            HealthStatus.ERROR,
+                            detail=reason or "the stored Home Assistant settings are unusable",
+                        )
+                        return
+                    # Assigned before the install so a failure there still leaves the
+                    # client owned by the lifespan, which closes it at shutdown.
+                    app_state.ha_websocket = client
+                    await _install_ha_watch(
+                        client,
+                        base_url=settings[0],
+                        injected=False,
+                        at_startup=False,
+                        rebuilt=True,
+                    )
+                    ha_generation = settings
             except Exception as exc:
                 _LOGGER.warning(
-                    "could not start Home Assistant after the settings change: %s: %s",
+                    "could not apply the Home Assistant settings change: %s: %s",
                     type(exc).__name__,
                     exc,
                 )
@@ -740,7 +889,7 @@ def create_app(
                     "could not read the configuration-interface password from settings: %s", exc
                 )
             auth_unsubscribe = store.events.subscribe(_refresh_auth_gate)
-            settings_unsubscribe = store.events.subscribe(_start_ha_after_settings)
+            settings_unsubscribe = store.events.subscribe(_apply_ha_settings)
             try:
                 applied_level = await apply_stored_log_level(config, store)
             except Exception as exc:

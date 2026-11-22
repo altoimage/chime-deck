@@ -5,8 +5,11 @@ this script runs the **real** application (:func:`chime_deck.app.create_app`)
 with every device replaced by the offline fakes the test suite already owns:
 :class:`~mqtt_fakes.FakeBroker` for MQTT, :class:`~chime_fakes.RecordingBackend`
 for the speaker, and a real
-:class:`~chime_deck.ha.HomeAssistantWebSocketClient` talking to a scripted
-:class:`~ha_ws_fakes.FakeHaPeer`.
+:class:`~chime_deck.ha.HomeAssistantWebSocketClient` — built by the app's own
+construction seam — talking to a scripted :class:`~ha_ws_fakes.FakeHaPeer`.
+Because the bench passes a *factory* rather than a client instance, the app's
+lifespan owns every generation of that client and a committed
+``ha.base_url``/``ha.token`` change rebuilds it in place, still offline.
 
 Nothing here is production code and nothing here may touch the repository: the
 data directory is a fixed per-port path under the system temp directory that is
@@ -52,6 +55,13 @@ own catch-all:
     wrapper exposes it and it is never reachable through the app: the app's own
     catch-all serves the SPA for ``/__test/token`` like any other unknown path.
 
+``POST /__test/ha_credentials``
+    Writes ``ha.base_url`` and/or ``ha.token`` through the *live* store, or clears
+    the token with ``""`` / ``null``. The app's own settings subscriber rebuilds
+    the websocket client in place (against the scripted peer factory, still
+    offline), so a spec can watch a credential change take effect with no
+    restart. Exposed only on this outer wrapper, exactly like ``__test/token``.
+
 ``tests/`` is deliberately not a package, so the plain ``chime_fakes`` and
 ``ha_ws_fakes`` imports only work when the caller puts ``tests`` on
 ``PYTHONPATH``. The Playwright ``webServer`` does exactly that.
@@ -73,12 +83,13 @@ import tempfile
 import time
 import wave
 from collections.abc import AsyncIterator, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Final
 
 import uvicorn
 from chime_fakes import RecordingBackend, build_offline_wiring
-from ha_ws_fakes import FakeHaFactory, FakeHaPeer, make_client
+from ha_ws_fakes import FakeHaFactory, FakeHaPeer
 from mqtt_fakes import FakeBroker
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -87,6 +98,7 @@ from starlette.routing import Mount, Route
 
 from chime_deck.app import AppState, create_app
 from chime_deck.config import ServerConfig, configure_logging
+from chime_deck.ha import HomeAssistantWebSocketClient
 from chime_deck.health import HealthStatus
 from chime_deck.store import (
     Button,
@@ -126,6 +138,14 @@ CHIME_FRAME_COUNT: Final = 1600
 SENTINEL_ENTITY_ID: Final = "lock.front_door"
 """The entity whose state proves the initial Home Assistant snapshot arrived."""
 
+HA_TOKEN: Final = "long-lived-token-0123456789abcdef"
+"""The ``ha.token`` the seed stores and the bench's peer factory accepts.
+
+One constant rather than two literals: the scripted peer rejects any token it
+was not handed here, so a drift between the seed and the allowlist would leave
+the bench with a client that can never authenticate.
+"""
+
 CANONICAL_ENTITIES: Final = (
     ("lock.front_door", "Front Door", "mdi:lock"),
     ("sensor.hallway_temperature", "Hallway Temperature", "mdi:thermometer"),
@@ -144,7 +164,7 @@ CANONICAL_SETTINGS: Final = (
     ("ui.setup_dismissed", True),
     ("ui.show_clock", True),
     ("ha.base_url", "http://homeassistant.local:8123"),
-    ("ha.token", "long-lived-token-0123456789abcdef"),
+    ("ha.token", HA_TOKEN),
     ("audio.quiet_hours_start", "22:00"),
 )
 """The stored settings the seed writes; every other registry default is untouched."""
@@ -420,8 +440,8 @@ class TestBench:
     It also owns the two health flips a real broker and a real Home Assistant
     would produce on their own, because the fakes deliberately do not: the
     :class:`~mqtt_fakes.FakeClient` records ``loop_start`` without ever firing a
-    CONNACK, and the injected websocket client writes its statuses into a private
-    registry. Both are reported from the app's own event loop, bounded, so the
+    CONNACK, and the websocket client the app builds talks to a scripted peer
+    factory. Both are reported from the app's own event loop, bounded, so the
     header describes the bench that is actually running.
     """
 
@@ -468,18 +488,14 @@ class TestBench:
     def _report_home_assistant_connected(self) -> None:
         """Publish the Home Assistant status the bench's peer is actually in.
 
-        ``ha_ws_fakes.make_client`` builds the real client without a ``health=``
-        registry — it takes none — so every status the client reports lands in a
-        private :class:`~chime_deck.health.HealthRegistry` and the app's own
-        registry keeps its ``not_configured`` default, which is what the header
-        then showed over six live tiles.
-
-        This is not a fabricated status: the peer has subscribed (the caller
-        only reports it after :meth:`_wait_for_subscribed_peer` succeeded), so
-        the state recorded here is the state the client is really in. The
-        alternative — build the real client with ``health=`` once the app exists
-        — would mean the bench constructed and started a second client of its
-        own, and the app's lifespan already owns exactly one.
+        The app builds the client through its own construction seam with its own
+        :class:`~chime_deck.health.HealthRegistry`, so the client itself records
+        ``connected`` once the peer has accepted the handshake and the
+        subscription, and nothing lands in a private registry any more. The write
+        below survives as a fallback for the window before the supervisor's own
+        status arrives: the caller only reaches it after
+        :meth:`_wait_for_subscribed_peer` succeeded, so the state recorded here is
+        the state the client is really in, never a fabricated one.
         """
         health = self._state.health
         if health.get("ha") is not HealthStatus.CONNECTED:
@@ -680,6 +696,45 @@ class TestBench:
         await self._state.store.set_setting("server.token", "" if raw is None else raw)
         return JSONResponse({"authenticated": self._state.auth.required()})
 
+    async def ha_credentials(self, request: Request) -> Response:
+        """Set or clear the Home Assistant credentials through the live store.
+
+        Written through :meth:`ConfigStore.set_setting` rather than the settings
+        route for the same reason as :meth:`token`: the store accepts ``""`` for
+        this secret (which is how a credential is cleared), while the route
+        deliberately refuses an empty secret. A committed write publishes the
+        settings event the app's own subscriber listens for, and that subscriber
+        is awaited inside the write, so the answer below already describes the
+        client the next request will meet: the old one is closed and a new one is
+        built from the new settings, with no restart.
+
+        :param request: the incoming JSON request, ``{"base_url": "...",
+            "token": "..."}``; either key may be omitted, and a ``null`` or
+            ``""`` token clears it.
+        """
+        payload = await request.json()
+        if not isinstance(payload, Mapping):
+            return JSONResponse({"error": "the body must be a JSON object"}, status_code=400)
+        raw_base_url = payload.get("base_url")
+        raw_token = payload.get("token")
+        if raw_base_url is not None and not isinstance(raw_base_url, str):
+            return JSONResponse({"error": "base_url must be a string"}, status_code=400)
+        if raw_token is not None and not isinstance(raw_token, str):
+            return JSONResponse(
+                {"error": "token must be a string, or null to clear it"}, status_code=400
+            )
+        if raw_base_url is not None:
+            await self._state.store.set_setting("ha.base_url", raw_base_url)
+        if "token" in payload:
+            await self._state.store.set_setting("ha.token", "" if raw_token is None else raw_token)
+        return JSONResponse(
+            {
+                "base_url": await self._state.store.get_setting("ha.base_url"),
+                "token_stored": await self._state.store.has_secret("ha.token"),
+                "ha": self._state.health.get("ha").value,
+            }
+        )
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse the bench's two options.
@@ -723,6 +778,7 @@ def _build_outer_app(
         Route("/__test/reset", bench.reset, methods=["POST"]),
         Route("/__test/ha_state", bench.ha_state, methods=["POST"]),
         Route("/__test/token", bench.token, methods=["POST"]),
+        Route("/__test/ha_credentials", bench.ha_credentials, methods=["POST"]),
         Mount("/", app=doorbell),
     ]
 
@@ -757,10 +813,18 @@ async def _serve(port: int, static_dir: Path, data_dir: Path) -> None:
     )
     await seed_database(config)
 
-    factory = FakeHaFactory()
+    factory = FakeHaFactory(partial(FakeHaPeer, accepted_tokens={HA_TOKEN}))
     broker = FakeBroker()
     wiring = build_offline_wiring(broker=broker, backend=RecordingBackend())
-    doorbell = create_app(config, wiring=wiring, ha_websocket=make_client(factory))
+    # The construction seam rather than an injected instance: the app builds every
+    # generation of the client itself (with its own health registry and state
+    # callback), so a committed ``ha.*`` change rebuilds in place and every
+    # rebuild still lands on the scripted peer factory. No socket is opened.
+    doorbell = create_app(
+        config,
+        wiring=wiring,
+        ha_websocket_factory=partial(HomeAssistantWebSocketClient, connect=factory),
+    )
     bench = TestBench(config, doorbell.state.doorbell, factory, broker)
     outer = _build_outer_app(doorbell, bench)
 

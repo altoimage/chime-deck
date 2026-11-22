@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Final, cast
 
 from chime_deck.ha import HaWebSocketConnection, HomeAssistantWebSocketClient
@@ -41,17 +41,27 @@ class FakeHaPeer:
     """An in-memory Home Assistant peer driven frame by frame.
 
     The peer starts by asking the client to authenticate, answers ``auth`` with
-    ``auth_ok``, answers ``subscribe_entities`` with a successful result and
+    ``auth_ok`` (or ``auth_invalid`` when an allowlist is given and the token is
+    not in it), answers ``subscribe_entities`` with a successful result and
     answers every other command from the scripted *results* map. Everything it
     answers, and everything a test pushes, travels through one
     :class:`asyncio.Queue` that :meth:`recv` awaits.
     """
 
-    def __init__(self, *, results: Mapping[str, object] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        results: Mapping[str, object] | None = None,
+        accepted_tokens: Collection[str] | None = None,
+    ) -> None:
         """Create a peer that is waiting for the client's auth frame.
 
         :param results: command type to the ``result`` payload answered with;
             an unscripted command is answered with an empty object.
+        :param accepted_tokens: the tokens this peer accepts; ``None`` accepts
+            every token, which is the unscripted behaviour. A token outside the
+            allowlist is rejected with ``auth_invalid`` and the exact message Home
+            Assistant sends, which is what makes a revoked token testable.
         """
         self.sent: list[dict[str, object]] = []
         """Every frame the client sent, decoded, in order."""
@@ -60,6 +70,7 @@ class FakeHaPeer:
         """Whether the client's context manager closed this peer."""
 
         self._results = dict(results) if results is not None else {}
+        self._accepted_tokens = None if accepted_tokens is None else frozenset(accepted_tokens)
         self._subscription_id: int | None = None
         self._queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
         # Home Assistant speaks first: the client's handshake waits for this
@@ -75,7 +86,17 @@ class FakeHaPeer:
         self.sent.append(frame)
         frame_type = frame.get("type")
         if frame_type == "auth":
-            self._queue.put_nowait({"type": "auth_ok"})
+            if self._accepted_tokens is None or frame.get("access_token") in self._accepted_tokens:
+                self._queue.put_nowait({"type": "auth_ok"})
+            else:
+                # Verbatim Home Assistant wording: the client's ``_auth_detail``
+                # reads this key and reports it as the reason.
+                self._queue.put_nowait(
+                    {
+                        "type": "auth_invalid",
+                        "message": "Invalid access token or password",
+                    }
+                )
         elif frame_type == "subscribe_entities":
             self._subscription_id = cast("int", frame.get("id"))
             self._queue.put_nowait(
