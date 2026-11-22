@@ -332,7 +332,7 @@ async def test_an_mqtt_press_plays_the_sound(
     finally:
         gate.set()
 
-    assert fake_backend.played == [(cast(Path, button.sound_path), 70)]
+    assert fake_backend.played == [(cast(Path, button.sound_path), 100)]
 
 
 async def test_two_presses_inside_the_dedupe_window_play_once(
@@ -364,7 +364,7 @@ async def test_two_presses_inside_the_dedupe_window_play_once(
         deduped_row = await _wait_for_row(state, outcome="deduped", button_id=button.button_id)
         assert deduped_row.pressed_at == deduped["pressed_at"]
 
-    assert fake_backend.played == [(cast(Path, button.sound_path), 70)]
+    assert fake_backend.played == [(cast(Path, button.sound_path), 100)]
 
 
 async def test_quiet_hours_suppress_a_non_exempt_button_and_play_an_exempt_one(
@@ -409,7 +409,7 @@ async def test_quiet_hours_suppress_a_non_exempt_button_and_play_an_exempt_one(
         assert (await _next_press(state, hub_client))["outcome"] == "played"
         await _wait_for_row(state, outcome="played", button_id=exempt.button_id)
 
-    assert fake_backend.played == [(cast(Path, exempt.sound_path), 70)]
+    assert fake_backend.played == [(cast(Path, exempt.sound_path), 100)]
 
 
 async def test_a_muted_device_suppresses_an_mqtt_press(

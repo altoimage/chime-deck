@@ -24,9 +24,10 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+from audio_hardware_fakes import RecordingSpawner
 from mqtt_fakes import FakeBroker, FixedRandom, RecordingSleep
 
-from chime_deck.audio import AudioBackend, AudioDevice
+from chime_deck.audio import AudioBackend, AudioDevice, CommandSpawner
 from chime_deck.wiring import Wiring
 
 __all__ = ["RecordingBackend", "build_offline_wiring"]
@@ -150,6 +151,7 @@ def build_offline_wiring(
     broker: FakeBroker,
     backend: AudioBackend,
     press_clock: Callable[[], datetime] | None = None,
+    hardware_spawner: CommandSpawner | None = None,
 ) -> Wiring:
     """Assemble a wiring whose every device is a fake.
 
@@ -159,10 +161,15 @@ def build_offline_wiring(
     :param broker: in-memory broker that supplies the client factory.
     :param backend: speaker the playback worker starts.
     :param press_clock: source of the press timestamp, or ``None`` for aware UTC.
+    :param hardware_spawner: fake mixer commands; ``None`` builds a fresh
+        :class:`~audio_hardware_fakes.RecordingSpawner`, because a test that
+        injects this wiring explicitly bypasses the conftest factory and must
+        still never execute a real ``amixer`` (HARD RULE 4).
     :return: the wiring to hand to ``create_app(config, wiring=...)``.
     """
     return Wiring(
         audio_backend=backend,
+        hardware_spawner=(RecordingSpawner() if hardware_spawner is None else hardware_spawner),
         mqtt_client_factory=broker.factory,
         mqtt_sleep=RecordingSleep(),
         mqtt_rng=FixedRandom(0.0),

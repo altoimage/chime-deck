@@ -104,6 +104,7 @@ from typing import Final
 
 import httpx
 import uvicorn
+from audio_hardware_fakes import FakeCommand, RecordingSpawner
 from chime_fakes import RecordingBackend, build_offline_wiring
 from ha_ws_fakes import FakeHaFactory, FakeHaPeer
 from mqtt_fakes import FakeBroker
@@ -191,6 +192,10 @@ CANONICAL_SETTINGS: Final = (
     ("ha.base_url", "http://homeassistant.local:8123"),
     ("ha.token", HA_TOKEN),
     ("audio.quiet_hours_start", "22:00"),
+    ("audio.volume", 100),
+    ("audio.hardware_volume", 100),
+    ("audio.rail_target", "software"),
+    ("audio.hardware_control", ""),
 )
 """The stored settings the seed writes; every other registry default is untouched."""
 
@@ -866,6 +871,32 @@ def _listen_socket(port: int) -> socket.socket:
     return sock
 
 
+def _browser_hardware_spawner() -> RecordingSpawner:
+    """Provide an available, stateful PipeWire sink to the real API in browser tests.
+
+    The bench must never touch host audio, but its UI needs a usable hardware
+    slider so Playwright can prove the real settings PATCH. This fake models the
+    one output returned by ``RecordingBackend`` and carries writes into later
+    read-backs.
+    """
+    state: dict[str, int | bool] = {"percent": 100, "muted": False}
+
+    def command(argv: Sequence[str]) -> FakeCommand:
+        if len(argv) >= 3 and argv[1:3] == ("get-sink-volume", "offline-output"):
+            return FakeCommand(stdout=f"Volume: front-left: 65536 / {state['percent']}% / 0.00 dB")
+        if len(argv) >= 3 and argv[1:3] == ("get-sink-mute", "offline-output"):
+            return FakeCommand(stdout=f"Mute: {'yes' if state['muted'] else 'no'}")
+        if len(argv) == 4 and argv[1:3] == ("set-sink-volume", "offline-output"):
+            state["percent"] = int(argv[3].removesuffix("%"))
+            return FakeCommand()
+        if len(argv) == 4 and argv[1:3] == ("set-sink-mute", "offline-output"):
+            state["muted"] = argv[3] != "0"
+            return FakeCommand()
+        return FakeCommand(returncode=1, stderr="unexpected fake mixer command")
+
+    return RecordingSpawner(command)
+
+
 def _build_outer_app(
     doorbell: Starlette,
     bench: TestBench,
@@ -921,7 +952,11 @@ async def _serve(port: int, static_dir: Path, data_dir: Path) -> None:
 
     factory = FakeHaFactory(partial(FakeHaPeer, accepted_tokens={HA_TOKEN}))
     broker = FakeBroker()
-    wiring = build_offline_wiring(broker=broker, backend=RecordingBackend())
+    wiring = build_offline_wiring(
+        broker=broker,
+        backend=RecordingBackend(),
+        hardware_spawner=_browser_hardware_spawner(),
+    )
     # The construction seam rather than an injected instance: the app builds every
     # generation of the client itself (with its own health registry and state
     # callback), so a committed ``ha.*`` change rebuilds in place and every

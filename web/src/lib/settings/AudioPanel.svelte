@@ -2,9 +2,11 @@
   import {
     ApiError,
     listAudioDevices,
+    readHardwareVolume,
     readServerClock,
     testAudio,
     type AudioDevicesResponse,
+    type HardwareVolumeResponse,
     type AudioTestResponse,
     type ServerClockReading
   } from '../api.js';
@@ -22,22 +24,39 @@
   import Badge from '../ui/Badge.svelte';
   import Button from '../ui/Button.svelte';
   import Card from '../ui/Card.svelte';
+  import Input from '../ui/Input.svelte';
+  import SegmentedControl from '../ui/SegmentedControl.svelte';
   import Select from '../ui/Select.svelte';
   import Slider from '../ui/Slider.svelte';
   import Spinner from '../ui/Spinner.svelte';
   import Stepper from '../ui/Stepper.svelte';
   import Toggle from '../ui/Toggle.svelte';
   import SectionFooter from './SectionFooter.svelte';
-  import { DEFAULT_VOLUME, clampVolume, isMuted, unmuteTarget } from '../volume.js';
+  import {
+    DEFAULT_HARDWARE_VOLUME,
+    DEFAULT_RAIL_TARGET,
+    DEFAULT_VOLUME,
+    clampVolume,
+    isRailTarget,
+    type RailTarget
+  } from '../volume.js';
 
   const DEFAULT_BACKEND = 'mpv';
   const DEFAULT_SYSTEM_DEVICE = 'auto';
 
   const backendOptions = [{ value: 'mpv', label: 'mpv (libmpv)' }];
+  const railTargetOptions = [
+    { value: 'software', label: 'Software' },
+    { value: 'hardware', label: 'Hardware' }
+  ];
 
   let backend = $state(DEFAULT_BACKEND);
   let deviceChoice = $state(DEFAULT_SYSTEM_DEVICE);
   let volume = $state(DEFAULT_VOLUME);
+  let hardwareVolume = $state(DEFAULT_HARDWARE_VOLUME);
+  let railTarget = $state<RailTarget>(DEFAULT_RAIL_TARGET);
+  let hardwareControl = $state('');
+  let muted = $state(false);
   let quietHoursEnabled = $state(false);
   let quietStart = $state<ClockTime>({ ...DEFAULT_QUIET_START });
   let quietEnd = $state<ClockTime>({ ...DEFAULT_QUIET_END });
@@ -45,7 +64,11 @@
   let initialised = $state(false);
   let saving = $state(false);
   let saveError = $state<string | null>(null);
-  let lastNonZero = $state(DEFAULT_VOLUME);
+
+  let hardwareStatus = $state<HardwareVolumeResponse | null>(null);
+  let hardwareLoading = $state(true);
+  let hardwareError = $state<string | null>(null);
+  let hardwareSequence = 0;
 
   let discovery = $state<AudioDevicesResponse | null>(null);
   let discoveryLoading = $state(true);
@@ -75,6 +98,10 @@
     backend !== settings.text('audio.backend', DEFAULT_BACKEND) ||
       deviceChoice !== baselineDeviceChoice() ||
       volume !== settings.integer('audio.volume', 0, 100, DEFAULT_VOLUME) ||
+      hardwareVolume !== settings.hardwareVolume ||
+      railTarget !== settings.railTarget ||
+      hardwareControl !== settings.text('audio.hardware_control') ||
+      muted !== settings.muted ||
       quietHoursEnabled !== settings.flag('audio.quiet_hours_enabled', false) ||
       formatClockTime(quietStart) !==
         formatClockTime(
@@ -100,15 +127,14 @@
     return hint;
   }
 
-  function rebase(preserveMuteMemory = false): void {
+  function rebase(): void {
     backend = settings.text('audio.backend', DEFAULT_BACKEND);
     deviceChoice = baselineDeviceChoice();
     volume = settings.integer('audio.volume', 0, 100, DEFAULT_VOLUME);
-    if (volume > 0) {
-      lastNonZero = volume;
-    } else if (!preserveMuteMemory) {
-      lastNonZero = DEFAULT_VOLUME;
-    }
+    hardwareVolume = settings.hardwareVolume;
+    railTarget = settings.railTarget;
+    hardwareControl = settings.text('audio.hardware_control');
+    muted = settings.muted;
     quietHoursEnabled = settings.flag('audio.quiet_hours_enabled', false);
     quietStart = {
       ...(parseClockTime(settings.text('audio.quiet_hours_start')) ?? DEFAULT_QUIET_START)
@@ -160,6 +186,29 @@
     }
   }
 
+  async function refreshHardware(): Promise<void> {
+    const sequence = ++hardwareSequence;
+    hardwareLoading = true;
+    hardwareError = null;
+    try {
+      const response = await readHardwareVolume();
+      if (!alive || sequence !== hardwareSequence) {
+        return;
+      }
+      hardwareStatus = response;
+    } catch (cause) {
+      if (!alive || sequence !== hardwareSequence) {
+        return;
+      }
+      hardwareError =
+        cause instanceof ApiError ? cause.message : 'the hardware volume could not be read';
+    } finally {
+      if (alive && sequence === hardwareSequence) {
+        hardwareLoading = false;
+      }
+    }
+  }
+
   async function refreshClock(): Promise<void> {
     clockError = null;
     clockReading = null;
@@ -181,6 +230,7 @@
   $effect(() => {
     alive = true;
     void refreshDiscovery();
+    void refreshHardware();
     void refreshClock();
     const interval = setInterval(() => {
       browserNow = Date.now();
@@ -189,6 +239,7 @@
       alive = false;
       clearInterval(interval);
       discoverySequence += 1;
+      hardwareSequence += 1;
     };
   });
 
@@ -203,6 +254,18 @@
     }
     if (volume !== settings.integer('audio.volume', 0, 100, DEFAULT_VOLUME)) {
       patch['audio.volume'] = volume;
+    }
+    if (hardwareVolume !== settings.hardwareVolume) {
+      patch['audio.hardware_volume'] = hardwareVolume;
+    }
+    if (railTarget !== settings.railTarget) {
+      patch['audio.rail_target'] = railTarget;
+    }
+    if (hardwareControl !== settings.text('audio.hardware_control')) {
+      patch['audio.hardware_control'] = hardwareControl;
+    }
+    if (muted !== settings.muted) {
+      patch['audio.muted'] = muted;
     }
     if (quietHoursEnabled !== settings.flag('audio.quiet_hours_enabled', false)) {
       patch['audio.quiet_hours_enabled'] = quietHoursEnabled;
@@ -235,8 +298,9 @@
     }
     saving = false;
     if (ok) {
-      rebase(true);
+      rebase();
       void refreshDiscovery();
+      void refreshHardware();
     } else {
       saveError = settings.error ?? 'the settings could not be saved';
     }
@@ -244,13 +308,20 @@
 
   function updateVolume(value: number): void {
     volume = clampVolume(value);
-    if (volume > 0) {
-      lastNonZero = volume;
+  }
+
+  function updateHardwareVolume(value: number): void {
+    hardwareVolume = clampVolume(value);
+  }
+
+  function updateRailTarget(value: string): void {
+    if (isRailTarget(value)) {
+      railTarget = value;
     }
   }
 
   function toggleMute(): void {
-    updateVolume(isMuted(volume) ? unmuteTarget(lastNonZero) : 0);
+    muted = !muted;
   }
 
   function updateQuietStartHour(hour: number): void {
@@ -405,10 +476,10 @@
       <div class="field volume-field">
         <div class="volume-controls">
           <div class="slider-commit" onchange={() => updateVolume(volume)}>
-            <Slider label="Volume" bind:value={volume} min={0} max={100} step={1} unit="%" />
+            <Slider label="Software volume" bind:value={volume} min={0} max={100} step={1} unit="%" />
           </div>
           <Stepper
-            label="Volume"
+            label="Software volume"
             bind:value={volume}
             min={0}
             max={100}
@@ -417,13 +488,82 @@
             change={updateVolume}
           />
         </div>
-        <Button variant="secondary" onclick={toggleMute}>{isMuted(volume) ? 'Unmute' : 'Mute'}</Button>
+        <Button variant="secondary" onclick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</Button>
         <div class="helper">
-          <p>Mute sets the doorbell's own volume to 0%. It does not change the system mixer.</p>
-          <p>Unmute returns to the last volume used here — 70% after a reload.</p>
-          <p>There is deliberately no system-mixer row because this build has no PipeWire/Pulse read.</p>
+          <p>
+            What you hear is this software gain multiplied by the device's own hardware control.
+            They are independent on purpose: 50% software + 50% hardware does not mean you selected
+            one 25% volume setting.
+          </p>
+          <p>Mute silences both stages and leaves their saved levels unchanged.</p>
         </div>
       </div>
+
+      <div class="field volume-field">
+        <div class="volume-controls">
+          <div class="slider-commit" onchange={() => updateHardwareVolume(hardwareVolume)}>
+            <Slider
+              label="Hardware volume"
+              bind:value={hardwareVolume}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              disabled={hardwareStatus === null || !hardwareStatus.ok || !hardwareStatus.available}
+            />
+          </div>
+          <Stepper
+            label="Hardware volume"
+            bind:value={hardwareVolume}
+            min={0}
+            max={100}
+            step={1}
+            unit="%"
+            disabled={hardwareStatus === null || !hardwareStatus.ok || !hardwareStatus.available}
+            change={updateHardwareVolume}
+          />
+        </div>
+        {#if hardwareLoading && hardwareStatus === null}
+          <p class="hint" role="status">Reading hardware volume…</p>
+        {:else if hardwareError !== null}
+          <p class="error" role="status">{hardwareError}</p>
+          <Button onclick={() => void refreshHardware()}>Retry hardware read</Button>
+        {:else if hardwareStatus !== null && !hardwareStatus.ok}
+          <p class="error" role="status">
+            {hardwareStatus.reason || 'The hardware volume status could not be read.'}
+          </p>
+        {:else if hardwareStatus !== null && !hardwareStatus.available}
+          <p class="hint" role="status">{hardwareStatus.reason}</p>
+        {:else if hardwareStatus !== null}
+          <p class="readback" role="status">
+            {hardwareStatus.control ?? 'Hardware control'} on {hardwareStatus.device ?? 'the selected output'}
+            — the device reports {hardwareStatus.muted ? 'muted' : `${hardwareStatus.percent ?? 'an unknown level'}${hardwareStatus.percent === null ? '' : '%'}`} right now.
+          </p>
+          {#if hardwareStatus.percent !== null &&
+            hardwareStatus.configured !== null &&
+            hardwareStatus.configured !== hardwareStatus.percent}
+            <p class="mismatch" role="status">
+              You asked for {hardwareStatus.configured}%, but the device reports {hardwareStatus.percent}%.
+            </p>
+          {/if}
+        {/if}
+      </div>
+
+      <SegmentedControl
+        label="Rail volume buttons"
+        options={railTargetOptions}
+        value={railTarget}
+        change={updateRailTarget}
+      />
+      <p class="hint rail-hint">The front-panel ⬆/⬇ buttons change this one.</p>
+
+      <Input
+        label="Hardware control (advanced)"
+        bind:value={hardwareControl}
+        placeholder="auto"
+        maxlength={64}
+        hint="Leave empty to auto-detect; set the ALSA control name when the card exposes several (Speaker, Mic, Auto Gain Control)."
+      />
     </div>
   </Card>
 
@@ -642,6 +782,25 @@
 
   .helper p {
     margin: 0;
+  }
+
+  .readback,
+  .mismatch {
+    margin: 0;
+    font-size: var(--text-body);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .readback {
+    color: var(--text-muted);
+  }
+
+  .mismatch {
+    padding-inline-start: var(--gap-sm);
+    border-inline-start: var(--border-width) solid var(--state-alert);
+    color: var(--state-alert);
+    font-weight: 600;
   }
 
   .volume-controls {

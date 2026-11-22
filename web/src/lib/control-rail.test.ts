@@ -135,11 +135,12 @@ describe('control rail structure', () => {
       'A'
     ]);
     expect(controls.map((control) => control.getAttribute('aria-label'))).toEqual([
-      'Turn volume up',
-      'Turn volume down',
+      'Turn software volume up',
+      'Turn software volume down',
       'Mute',
       'Settings'
     ]);
+    expect(mustFind('[data-testid="rail-volume-target"]').textContent?.trim()).toBe('Software');
     for (const button of controls.slice(0, 3)) {
       expect(button.getAttribute('type')).toBe('button');
     }
@@ -177,6 +178,33 @@ describe('volume taps', () => {
     await vi.waitFor(() => {
       expect(patchBodies(calls)).toEqual([{ 'audio.volume': 75 }, { 'audio.volume': 80 }]);
     });
+  });
+
+  it('uses one software key per PATCH and the target caption names that key', async () => {
+    await loadWith({ 'audio.rail_target': 'software' });
+    render();
+
+    const up = mustFind<HTMLButtonElement>('[data-testid="rail-volume-up"]');
+    expect(up.getAttribute('aria-label')).toBe('Turn software volume up');
+    up.click();
+    await vi.waitFor(() => {
+      expect(patchBodies(calls)).toEqual([{ 'audio.volume': 75 }]);
+    });
+    expect(Object.keys(patchBodies(calls)[0])).toEqual(['audio.volume']);
+  });
+
+  it('steps hardware volume only when hardware is the rail target', async () => {
+    await loadWith({ 'audio.hardware_volume': 40, 'audio.rail_target': 'hardware' });
+    render();
+
+    expect(mustFind('[data-testid="rail-volume-target"]').textContent?.trim()).toBe('Hardware');
+    const up = mustFind<HTMLButtonElement>('[data-testid="rail-volume-up"]');
+    expect(up.getAttribute('aria-label')).toBe('Turn hardware volume up');
+    up.click();
+    await vi.waitFor(() => {
+      expect(patchBodies(calls)).toEqual([{ 'audio.hardware_volume': 45 }]);
+    });
+    expect(Object.keys(patchBodies(calls)[0])).toEqual(['audio.hardware_volume']);
   });
 
   it('clamps at 100: the end sticks instead of running past the range', async () => {

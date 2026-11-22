@@ -418,6 +418,26 @@ export interface AudioDevicesResponse {
 }
 
 /**
+ * `GET /api/audio/hardware` — read-only status for the output's own volume stage.
+ *
+ * An unavailable mixer is a normal HTTP 200 verdict; `reason` is the sentence
+ * the panel shows beside its disabled hardware control. `configured` is the
+ * saved target, while `percent` is the device's current read-back.
+ */
+export interface HardwareVolumeResponse {
+  ok: boolean;
+  available: boolean;
+  device: string | null;
+  control: string | null;
+  percent: number | null;
+  muted: boolean;
+  reason: string;
+  /** The stored `audio.hardware_volume`, or null when the store held no integer. */
+  configured: number | null;
+  applied: number | null;
+}
+
+/**
  * The device's own clock as one HTTP exchange revealed it.
  *
  * There is no wall-clock field in the API (design 05 §3's `/api/health` is
@@ -1917,6 +1937,11 @@ export function testAudio(): Promise<AudioTestResponse> {
  */
 export function listAudioDevices(): Promise<AudioDevicesResponse> {
   return request<AudioDevicesResponse>('/api/audio/devices');
+}
+
+/** Read, but never write, the selected output's hardware volume control. */
+export function readHardwareVolume(): Promise<HardwareVolumeResponse> {
+  return request<HardwareVolumeResponse>('/api/audio/hardware');
 }
 
 /**

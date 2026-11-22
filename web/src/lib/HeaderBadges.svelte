@@ -21,7 +21,8 @@
       quietEnd: settings.text('audio.quiet_hours_end', '07:00'),
       quietVolume: settings.integer('audio.quiet_hours_volume', 0, 100, 0),
       muted: settings.muted,
-      volume: settings.volume
+      volume: settings.volume,
+      hardwareVolume: settings.hardwareVolume
     })
   );
 </script>

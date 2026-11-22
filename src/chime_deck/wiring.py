@@ -47,7 +47,7 @@ import contextlib
 import logging
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +58,9 @@ from .audio import (
     AudioBackend,
     AudioBackendUnavailable,
     AudioDevice,
+    CommandSpawner,
+    HardwareVolume,
+    HardwareVolumeStatus,
     MpvBackend,
     warm_library,
 )
@@ -109,6 +112,21 @@ _DEFAULT_WAKE_LEAD_IN_MS: Final = 1500
 _AUDIO_KEY_PREFIX: Final = "audio."
 """Settings key prefix that re-arms a stopped audio start."""
 
+_HARDWARE_VOLUME_KEYS: Final = frozenset(
+    {
+        "audio.hardware_volume",
+        "audio.muted",
+        "audio.hardware_control",
+        "audio.device_hint",
+    }
+)
+"""The ``audio.*`` keys that change the device's own volume control (cd-qul9).
+
+The first three change what :class:`~chime_deck.audio.HardwareVolume` writes; a
+``device_hint`` change moves the output, and the control belongs to the output,
+so it re-applies the stored level to the new device as well. Every other
+``audio.*`` key keeps its old behaviour: a running speaker is left alone."""
+
 _AUDIO_START_MAX_ATTEMPTS: Final = 5
 """Total start attempts, the startup one included, before the ladder gives up."""
 
@@ -136,6 +154,10 @@ class Wiring:
 
     #: Speaker to play through; ``None`` builds one from ``audio.backend``.
     audio_backend: AudioBackend | None = None
+    #: Seam for the device's own volume commands (``amixer``/``pactl``);
+    #: ``None`` uses :data:`~chime_deck.audio.DEFAULT_SPAWN`, and the test suite
+    #: injects a recording fake so no test can execute a real mixer.
+    hardware_spawner: CommandSpawner | None = None
     #: Builds the paho client; ``None`` means the bridge's own factory.
     mqtt_client_factory: ClientFactory | None = None
     #: Delay used for the MQTT birth jitter; the production value is the real sleep.
@@ -342,6 +364,12 @@ class ChimePipeline:
         self._mqtt_generations = 0
         self._unsubscribe: Callable[[], None] | None = None
         self._audio_recovery: asyncio.Task[None] | None = None
+        self._hardware_task: asyncio.Task[None] | None = None
+        self._hardware = HardwareVolume(
+            store=self._store,
+            backend=lambda: self.backend,
+            spawner=self._wiring.hardware_spawner,
+        )
         # The generation retires a superseded ladder at its next check instead of
         # cancelling one that is mid-attempt, which would drop a half-built player.
         self._audio_generation = 0
@@ -503,6 +531,8 @@ class ChimePipeline:
         self._audio_generation += 1
         await self._cancel_bounded(self._audio_recovery, what="audio recovery")
         self._audio_recovery = None
+        await self._cancel_bounded(self._hardware_task, what="hardware volume")
+        self._hardware_task = None
         await self._cancel_bounded(self._audio_warm_up, what="audio warm-up")
         self._audio_warm_up = None
         worker, self._worker = self._worker, None
@@ -607,6 +637,12 @@ class ChimePipeline:
         else:
             self._health.set("audio", HealthStatus.READY)
             self._logger.info("audio playback is ready")
+            # The measured bug of cd-qul9: a device whose own control sits at 43%
+            # makes a UI 100% audibly half volume. Applying the stored value here
+            # is what replaces the OS's arbitrary level at boot. It never raises
+            # and a mixer failure changes no health status, because a cosmetic
+            # volume problem must not make the doorbell look dead.
+            await self._reapply_hardware()
 
     def _arm_audio_recovery(
         self, worker: PlaybackWorker, *, wait_first: bool, attempts_so_far: int
@@ -694,6 +730,10 @@ class ChimePipeline:
                     _attempts_label(attempts),
                     self._wiring.audio_clock() - started,
                 )
+                # A recovered speaker is a (re)started output: re-apply the stored
+                # device level, exactly like the boot path, so a DAC that came
+                # back at its own default is brought to the app's value.
+                await self._reapply_hardware()
                 return
         if last_error is None:
             return
@@ -1002,7 +1042,7 @@ class ChimePipeline:
             if not isinstance(keys, tuple):
                 return
             if any(isinstance(key, str) and key.startswith(_AUDIO_KEY_PREFIX) for key in keys):
-                self._on_audio_settings_changed()
+                self._on_audio_settings_changed(keys)
             # ``device.name`` is not an ``mqtt.*`` key but it does change a
             # discovery payload, so it rebuilds the generation too.
             if not any(
@@ -1017,24 +1057,31 @@ class ChimePipeline:
                 "reloading the MQTT bridge after a settings change failed: %s", exc
             )
 
-    def _on_audio_settings_changed(self) -> None:
-        """Re-arm the start retry for a speaker that is not running; leave a running one alone.
+    def _on_audio_settings_changed(self, keys: Sequence[object]) -> None:
+        """Apply the new device level and re-arm a stopped speaker; never block the bus.
 
         Values are re-read where they are used — volume and the quiet window per
         press, ``audio.start_timeout_s`` before every start attempt — but a
         backend is built once, at start. A healthy worker therefore keeps its
-        own backend and its output through the settings write, and picks the new
-        values up after a restart: the documented policy, and it must not
-        interrupt a chime. That is also why a ``device_hint`` change cannot be
-        what this re-arm fixes. :class:`MpvBackend` applies the hint only after a
-        successful start, and a hint that matches no device just logs a warning
-        and falls back to the system default, so a stale hint never fails a
-        start and a new hint reaches the speaker on the next start.
+        own backend and its output through the settings write: the documented
+        policy, and it must not interrupt a chime.
 
-        A speaker that is not running is the interesting case: health already
-        shows audio disconnected, and the owner raises ``audio.start_timeout_s``.
-        Re-arming retries at once instead of waiting out a backoff step, and the
-        next attempt reads the new budget.
+        The exception is the device's own volume control (cd-qul9). A running
+        speaker is exactly where a new ``audio.hardware_volume``, ``audio.muted``,
+        ``audio.hardware_control`` or ``audio.device_hint`` has to land, and it
+        lands through the mixer rather than through a restart, so those keys
+        schedule :meth:`_reapply_hardware` as a tracked task. The schedule is a
+        ``create_task`` because this method is called from ``EventBus.publish``,
+        which runs inside the settings write: awaiting a mixer there would make
+        the HTTP response wait on ``amixer``.
+
+        A speaker that is not running is the other interesting case: health
+        already shows audio disconnected, and the owner raises
+        ``audio.start_timeout_s``. Re-arming retries at once instead of waiting
+        out a backoff step, and the next attempt reads the new budget; the
+        hardware level is then applied by that start's success branch.
+
+        :param keys: the committed settings keys named by the event's payload.
         """
         worker = self._worker
         if worker is None:
@@ -1043,6 +1090,13 @@ class ChimePipeline:
             )
             return
         if worker.is_running:
+            if any(isinstance(key, str) and key in _HARDWARE_VOLUME_KEYS for key in keys):
+                self._logger.info(
+                    "audio settings changed; applying the stored level to the device's own "
+                    "volume control now"
+                )
+                self._schedule_hardware_reapply()
+                return
             self._logger.info(
                 "audio settings changed; the running speaker keeps its current output until "
                 "the service restarts"
@@ -1054,3 +1108,54 @@ class ChimePipeline:
         # A fresh start: the caller made no attempt of its own, so this ladder's
         # first attempt is numbered 1 and is tried straight away.
         self._arm_audio_recovery(worker, wait_first=False, attempts_so_far=0)
+
+    def _schedule_hardware_reapply(self) -> None:
+        """Re-apply the stored device level in a tracked task, replacing any pending one.
+
+        Only one re-apply can be useful at a time: a second settings write while
+        the first is still running supersedes it, so the older task is cancelled
+        (its command is killed and reaped) instead of piling up behind the mixer
+        lock. Cancellation is safe here because :meth:`HardwareVolume.apply`
+        holds the lock only for its own bounded commands.
+        """
+        previous, self._hardware_task = self._hardware_task, None
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self._hardware_task = asyncio.create_task(self._reapply_hardware(), name="hardware-volume")
+
+    async def _reapply_hardware(self) -> None:
+        """Apply the stored device level, logging the outcome. Never raises.
+
+        Total by construction: :meth:`HardwareVolume.apply` reports every failure
+        as a status, so this only has to log it — and it must not raise, because
+        it runs as a background task where an exception would be a warning with a
+        traceback for a cosmetic problem.
+        """
+        status = await self.reapply_hardware()
+        if status.available:
+            self._logger.info(
+                "the device's own volume control is at %s%% (%s)",
+                status.percent,
+                status.control,
+            )
+            return
+        self._logger.debug("the device's own volume control is unavailable: %s", status.reason)
+
+    async def reapply_hardware(self) -> HardwareVolumeStatus:
+        """Set the resolved output's own control to the stored level and read it back.
+
+        Called at startup, after a recovery and on every device change (including
+        the test tone's ``set_device``). Never raises: a mixer that is missing,
+        wedged or absent from the output is reported in the returned status, so a
+        caller may use it on a path where a cosmetic failure must not fail the
+        request.
+        """
+        return await self._hardware.apply()
+
+    async def read_hardware(self) -> HardwareVolumeStatus:
+        """Read the resolved output's own control without changing it. Never raises.
+
+        This is the API route's method: a ``GET`` that writes a system mixer is a
+        surprise, so the read path is separate from :meth:`reapply_hardware`.
+        """
+        return await self._hardware.read()

@@ -44,6 +44,7 @@ function badgeInput(overrides: Partial<BadgeInput> = {}): BadgeInput {
     quietVolume: 0,
     muted: false,
     volume: 70,
+    hardwareVolume: 100,
     ...overrides
   };
 }
@@ -95,7 +96,14 @@ describe('headerBadges', () => {
     );
   });
 
-  it('shows the crossed speaker at zero gain even when audio.muted is off', () => {
+  it('shows the crossed speaker at zero software gain even when audio.muted is off', () => {
     expect(headerBadges(badgeInput({ volume: 0 }))).toEqual({ quietHours: false, muted: true });
+  });
+
+  it('shows the crossed speaker at zero hardware volume even with software at 100', () => {
+    expect(headerBadges(badgeInput({ volume: 100, hardwareVolume: 0 }))).toEqual({
+      quietHours: false,
+      muted: true
+    });
   });
 });

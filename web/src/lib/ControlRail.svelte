@@ -16,18 +16,33 @@
     <button
       class="control"
       type="button"
-      aria-label="Turn volume up"
+      aria-label={`Turn ${settings.railTarget} volume up`}
       data-testid="rail-volume-up"
-      onclick={() => void settings.setVolume(stepVolume(settings.volume, 'up'))}
+      onclick={() =>
+        void settings.setRailVolume(
+          stepVolume(
+            settings.railTarget === 'hardware' ? settings.hardwareVolume : settings.volume,
+            'up'
+          )
+        )}
     >
       <Icon name="mdi:volume-plus" size={24} />
     </button>
+    <span class="target-caption" data-testid="rail-volume-target">
+      {settings.railTarget === 'hardware' ? 'Hardware' : 'Software'}
+    </span>
     <button
       class="control"
       type="button"
-      aria-label="Turn volume down"
+      aria-label={`Turn ${settings.railTarget} volume down`}
       data-testid="rail-volume-down"
-      onclick={() => void settings.setVolume(stepVolume(settings.volume, 'down'))}
+      onclick={() =>
+        void settings.setRailVolume(
+          stepVolume(
+            settings.railTarget === 'hardware' ? settings.hardwareVolume : settings.volume,
+            'down'
+          )
+        )}
     >
       <Icon name="mdi:volume-minus" size={24} />
     </button>
@@ -82,6 +97,25 @@
   button.control {
     font: inherit;
     cursor: pointer;
+  }
+
+  .target-caption {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 72px;
+    min-height: 24px;
+    margin-inline: calc(-1 * var(--gap-sm));
+    padding: 0;
+    border: var(--border-width) solid var(--border);
+    border-radius: 999px;
+    background: var(--surface-hover);
+    color: var(--text);
+    font-size: var(--text-label);
+    font-weight: 600;
+    line-height: 1.1;
+    white-space: nowrap;
   }
 
   .settings {

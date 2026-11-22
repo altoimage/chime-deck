@@ -36,7 +36,7 @@ import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
@@ -465,6 +465,12 @@ class LiveProbes:
     ``mqtt_timeout_s`` is the inner budget for one MQTT attempt, injectable so a
     test can prove the timeout path in milliseconds — the same reason ``clock``
     is injectable.
+
+    ``device_changed`` is the hook that runs after a successful
+    ``backend.set_device(hint)`` and before the tone plays, so the mixer follows
+    the device the tone will use (cd-qul9). It is optional and is invoked inside
+    its own guard: a mixer hiccup must never stop the tone the user just asked
+    for.
     """
 
     store: ConfigStore
@@ -473,6 +479,7 @@ class LiveProbes:
     mqtt_client_factory: ClientFactory | None = None
     mqtt_timeout_s: float = MQTT_PROBE_TIMEOUT_S
     clock: Callable[[], float] = time.monotonic
+    device_changed: Callable[[], Awaitable[object]] | None = None
 
     async def test_ha(self, candidate: HaProbeCandidate | None = None) -> HaProbeResult:
         """Report whether Home Assistant is configured, then its live entity count.
@@ -608,6 +615,7 @@ class LiveProbes:
         hint = stored_hint if isinstance(stored_hint, str) else ""
         try:
             await backend.set_device(hint)
+            await self._notify_device_changed()
             devices = await backend.list_devices()
             resolved = resolve_device(devices, hint)
             # The tone only has to exist while ``play`` runs; the temporary
@@ -632,3 +640,24 @@ class LiveProbes:
             return AudioProbeResult(ok=True, device=device, latency_ms=None)
         latency_ms = round(max(0.0, elapsed - TONE_DURATION_S) * 1000.0, 1)
         return AudioProbeResult(ok=True, device=device, latency_ms=latency_ms)
+
+    async def _notify_device_changed(self) -> None:
+        """Run the optional device-change hook, never letting it fail the probe.
+
+        The hook exists to apply the stored hardware level to the device the tone
+        is about to use (cd-qul9). It is guarded on its own, so a mixer that
+        cannot answer costs a DEBUG line and the tone — the thing the user
+        actually asked for — still plays. A route timeout or shutdown is a
+        cancellation of the probe itself, so it is not swallowed.
+        """
+        callback = self.device_changed
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception as exc:
+            _LOGGER.debug(
+                "the audio device-change hook failed (%s: %s); the test tone plays anyway",
+                type(exc).__name__,
+                exc,
+            )

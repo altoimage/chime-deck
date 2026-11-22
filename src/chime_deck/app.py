@@ -504,6 +504,10 @@ def create_app(
                 # ``default_wiring()`` leaves it ``None``, so the real paho
                 # factory is used.
                 mqtt_client_factory=resolved_wiring.mqtt_client_factory,
+                # A test tone selects a device, which is a device change: apply
+                # the stored hardware level to it first, so the tone is heard at
+                # the app's own volume (cd-qul9). The hook cannot fail the probe.
+                device_changed=chime.reapply_hardware,
             )
         ),
         chime=chime,

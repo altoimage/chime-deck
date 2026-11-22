@@ -31,7 +31,17 @@
 
 import { type SettingsResponse, ApiError, getSettings, patchSettings } from './api.js';
 import { theme } from './theme.svelte.js';
-import { DEFAULT_VOLUME, MAX_VOLUME, MIN_VOLUME, clampVolume } from './volume.js';
+import {
+  DEFAULT_HARDWARE_VOLUME,
+  DEFAULT_RAIL_TARGET,
+  DEFAULT_VOLUME,
+  MAX_VOLUME,
+  MIN_VOLUME,
+  clampVolume,
+  isRailTarget,
+  railVolumeKey,
+  type RailTarget
+} from './volume.js';
 
 /** `ui.show_clock` default (settings_registry.py). */
 const DEFAULT_SHOW_CLOCK = true;
@@ -150,9 +160,23 @@ class Settings {
     return this.integer('ui.dashboard_columns', MIN_COLUMNS, MAX_COLUMNS, DEFAULT_COLUMNS);
   }
 
-  /** Master volume, 0..100; the registry default (70) until a load says otherwise. */
+  /** Software volume, 0..100; the registry default is now 100 (cd-qul9). */
   get volume(): number {
     return this.integer('audio.volume', MIN_VOLUME, MAX_VOLUME, DEFAULT_VOLUME);
+  }
+
+  /** Hardware volume, 0..100; defaults to the registry's 100. */
+  get hardwareVolume(): number {
+    return this.integer('audio.hardware_volume', MIN_VOLUME, MAX_VOLUME, DEFAULT_HARDWARE_VOLUME);
+  }
+
+  /**
+   * Which independent stage the front-panel rail changes; malformed wire values
+   * safely fall back to software gain.
+   */
+  get railTarget(): RailTarget {
+    const value = this.#settings['audio.rail_target'];
+    return typeof value === 'string' && isRailTarget(value) ? value : DEFAULT_RAIL_TARGET;
   }
 
   /**
@@ -202,6 +226,22 @@ class Settings {
    */
   async setVolume(value: number): Promise<boolean> {
     return this.#patch({ 'audio.volume': clampVolume(value) }, 'the volume could not be saved');
+  }
+
+  /** Save one rail step to its selected stage, never to both stages. */
+  async setRailVolume(value: number): Promise<boolean> {
+    return this.#patch(
+      { [railVolumeKey(this.railTarget)]: clampVolume(value) },
+      'the volume could not be saved'
+    );
+  }
+
+  /** Save the device's hardware stage through the same single-PATCH path. */
+  async setHardwareVolume(value: number): Promise<boolean> {
+    return this.#patch(
+      { 'audio.hardware_volume': clampVolume(value) },
+      'the hardware volume could not be saved'
+    );
   }
 
   /**

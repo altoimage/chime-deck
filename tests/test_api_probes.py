@@ -972,7 +972,7 @@ async def test_the_audio_probe_resolves_the_device_and_measures_the_latency(
     assert body["error"] is None
     assert clock.reads == 2
     assert backend.hints == ["offline-output"]
-    assert backend.volumes == [70]
+    assert backend.volumes == [100]
     assert len(backend.played) == 1
 
 

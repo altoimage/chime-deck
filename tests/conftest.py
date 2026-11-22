@@ -34,12 +34,20 @@ from __future__ import annotations
 import shutil
 
 import pytest
+from audio_hardware_fakes import RecordingSpawner
 from chime_fakes import RecordingBackend
 from mqtt_fakes import FakeBroker, FixedRandom, RecordingSleep
 
 from chime_deck.wiring import Wiring
 
-__all__ = ["fake_backend", "fake_broker", "no_real_ffprobe", "offline_wiring", "real_ffprobe"]
+__all__ = [
+    "fake_backend",
+    "fake_broker",
+    "fake_hardware_spawner",
+    "no_real_ffprobe",
+    "offline_wiring",
+    "real_ffprobe",
+]
 
 
 @pytest.fixture
@@ -54,11 +62,18 @@ def fake_backend() -> RecordingBackend:
     return RecordingBackend()
 
 
+@pytest.fixture
+def fake_hardware_spawner() -> RecordingSpawner:
+    """Return the fake ``amixer``/``pactl`` spawner every application uses here."""
+    return RecordingSpawner()
+
+
 @pytest.fixture(autouse=True)
 def offline_wiring(
     monkeypatch: pytest.MonkeyPatch,
     fake_broker: FakeBroker,
     fake_backend: RecordingBackend,
+    fake_hardware_spawner: RecordingSpawner,
 ) -> Wiring:
     """Make every application this test builds fully offline.
 
@@ -69,10 +84,13 @@ def offline_wiring(
     :param monkeypatch: patcher that installs the replacement factory.
     :param fake_broker: broker the injected client factory comes from.
     :param fake_backend: speaker the injected audio backend is.
+    :param fake_hardware_spawner: fake mixer commands, so startup's hardware
+        volume apply can never execute a real ``amixer`` (HARD RULE 4).
     :return: the wiring every application built through ``create_app`` receives.
     """
     wiring = Wiring(
         audio_backend=fake_backend,
+        hardware_spawner=fake_hardware_spawner,
         mqtt_client_factory=fake_broker.factory,
         mqtt_sleep=RecordingSleep(),
         mqtt_rng=FixedRandom(0.0),

@@ -122,7 +122,7 @@ async def test_get_returns_every_non_secret_key_with_its_default(tmp_path: Path)
     body = cast("dict[str, object]", response.json())
     settings = cast("dict[str, object]", body["settings"])
     assert set(settings) == {key for key, spec in SETTINGS.items() if not spec.secret}
-    assert settings["audio.volume"] == 70
+    assert settings["audio.volume"] == 100
     assert settings["audio.start_timeout_s"] == 25
     assert settings["ui.theme"] == "dark"
     assert settings["system.log_level"] == "info"

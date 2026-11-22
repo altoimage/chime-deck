@@ -196,6 +196,6 @@ async def test_both_listeners_serve_one_application(tmp_path: Path) -> None:
         assert gated.status_code == 401
         assert login.status_code == 200
         assert unlocked.status_code == 200
-        assert unlocked.json()["settings"]["audio.volume"] == 70
+        assert unlocked.json()["settings"]["audio.volume"] == 100
         assert stream.status_code == 404
         assert PASSWORD not in unlocked.text

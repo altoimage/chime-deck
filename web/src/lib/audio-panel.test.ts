@@ -59,6 +59,17 @@ function fakeFetch(
 interface BackendOptions {
   settings?: Record<string, unknown>;
   devices?: DeviceRow[];
+  hardware?: {
+    ok: boolean;
+    available: boolean;
+    device: string | null;
+    control: string | null;
+    percent: number | null;
+    muted: boolean;
+    reason: string;
+    configured: number;
+    applied: number | null;
+  };
   audioTest?: unknown;
   dateHeader?: string | null;
   patchError?: { status: number; body: unknown };
@@ -90,6 +101,23 @@ function fakeBackend(options: BackendOptions = {}): Backend {
 
     if (path === '/api/settings') {
       return jsonResponse({ settings: { ...storedSettings }, secrets: {} });
+    }
+
+    if (path === '/api/audio/hardware') {
+      const configured = Number(storedSettings['audio.hardware_volume'] ?? 100);
+      return jsonResponse(
+        options.hardware ?? {
+          ok: true,
+          available: true,
+          device: 'alsa/usb-audio',
+          control: 'Speaker',
+          percent: configured,
+          muted: false,
+          reason: '',
+          configured,
+          applied: null
+        }
+      );
     }
 
     if (path === '/api/audio/devices') {
@@ -189,6 +217,18 @@ function selectTrigger(label: string): HTMLButtonElement {
   return button;
 }
 
+function inputByLabel(label: string): HTMLInputElement {
+  const field = [...document.querySelectorAll('label')].find(
+    (candidate) => candidate.textContent?.trim() === label
+  );
+  const id = field?.getAttribute('for') ?? null;
+  const input = id === null ? null : document.getElementById(id);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`expected an input labelled "${label}"`);
+  }
+  return input;
+}
+
 function chooseRadio(value: string): void {
   const radio = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find(
     (candidate) => candidate.value === value
@@ -202,6 +242,12 @@ function chooseRadio(value: string): void {
 
 function pageText(): string {
   return (document.body.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function type(input: HTMLInputElement, value: string): void {
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
 }
 
 function patches(calls: FakeCall[]): FakeCall[] {
@@ -222,6 +268,7 @@ async function loadAndRender(options: BackendOptions = {}): Promise<Backend> {
   await settings.load();
   renderPanel();
   await vi.waitFor(() => expect(pathCalls(backend.calls, '/api/audio/devices')).toHaveLength(1));
+  await vi.waitFor(() => expect(pathCalls(backend.calls, '/api/audio/hardware')).toHaveLength(1));
   await vi.waitFor(() => expect(document.querySelectorAll('button.trigger')).toHaveLength(2));
   await vi.waitFor(() => expect(document.querySelector('.clock-readings')).not.toBeNull());
   return backend;
@@ -313,6 +360,92 @@ describe('AC1 audio device selection', () => {
     );
     expect(pageText()).not.toContain('matches no discovered output');
     expect(patches(backend.calls)).toHaveLength(1);
+  });
+});
+
+/* ---- cd-qul9: independent volume stages ------------------------------- */
+
+describe('two-stage output volume', () => {
+  it('renders software and hardware sliders and saves both values in one PATCH', async () => {
+    const backend = await loadAndRender({
+      settings: { 'audio.volume': 60, 'audio.hardware_volume': 40 }
+    });
+
+    expect(inputByLabel('Software volume').type).toBe('range');
+    expect(inputByLabel('Hardware volume').type).toBe('range');
+    expect(pageText()).toContain('What you hear is this software gain multiplied by the device');
+    expect(pageText()).toContain('50% software + 50% hardware does not mean');
+
+    buttonByAriaLabel('Increase Software volume').click();
+    buttonByAriaLabel('Increase Hardware volume').click();
+    flushSync();
+    buttonByText('Save').click();
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+
+    expect(patchBody(patches(backend.calls)[0])).toEqual({
+      'audio.volume': 61,
+      'audio.hardware_volume': 41
+    });
+  });
+
+  it('disables hardware controls and shows the unavailable reason verbatim', async () => {
+    const reason = 'no hardware volume control on this output';
+    const backend = await loadAndRender({
+      hardware: {
+        ok: true,
+        available: false,
+        device: 'alsa/hdmi',
+        control: null,
+        percent: null,
+        muted: false,
+        reason,
+        configured: 100,
+        applied: null
+      }
+    });
+
+    expect(inputByLabel('Hardware volume').disabled).toBe(true);
+    expect(buttonByAriaLabel('Increase Hardware volume').disabled).toBe(true);
+    expect(pageText()).toContain(reason);
+    expect(patches(backend.calls)).toHaveLength(0);
+  });
+
+  it('names the live device/control read-back and explains a configured mismatch', async () => {
+    await loadAndRender({
+      settings: { 'audio.hardware_volume': 100 },
+      hardware: {
+        ok: true,
+        available: true,
+        device: 'alsa/hw:CARD=Device,DEV=0',
+        control: 'Speaker',
+        percent: 43,
+        muted: false,
+        reason: '',
+        configured: 100,
+        applied: 100
+      }
+    });
+
+    expect(pageText()).toContain(
+      'Speaker on alsa/hw:CARD=Device,DEV=0 — the device reports 43% right now.'
+    );
+    expect(pageText()).toContain('You asked for 100%, but the device reports 43%.');
+  });
+
+  it('saves the rail target and bounds the advanced hardware-control name', async () => {
+    const backend = await loadAndRender();
+
+    chooseRadio('hardware');
+    const control = inputByLabel('Hardware control (advanced)');
+    expect(control.getAttribute('maxlength')).toBe('64');
+    type(control, 'Speaker');
+    buttonByText('Save').click();
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+
+    expect(patchBody(patches(backend.calls)[0])).toEqual({
+      'audio.rail_target': 'hardware',
+      'audio.hardware_control': 'Speaker'
+    });
   });
 });
 
@@ -553,45 +686,35 @@ describe('audio behaviour guards', () => {
       expect(
         rows.filter((row) => row.querySelector('.row-label')?.textContent?.trim() === device.name)
       ).toHaveLength(1);
-      expect(renderedText.split(device.name)).toHaveLength(2);
+      expect(renderedText.split(device.name)).toHaveLength(
+        device.name === 'alsa/usb-audio' ? 3 : 2
+      );
     }
   });
 
-  it('mutes to zero and restores the last non-zero draft after the saved mute', async () => {
-    const backend = await loadAndRender({ settings: { 'audio.volume': 55 } });
+  it('mutes both stages through audio.muted without changing the software value', async () => {
+    const backend = await loadAndRender({
+      settings: { 'audio.volume': 55, 'audio.hardware_volume': 35 }
+    });
 
     buttonByText('Mute').click();
     flushSync();
-    expect(document.querySelector('.volume-field')?.textContent).toContain('0%');
+    expect(buttonByText('Unmute')).toBeTruthy();
+    expect(inputByLabel('Software volume').value).toBe('55');
+    expect(inputByLabel('Hardware volume').value).toBe('35');
     buttonByText('Save').click();
     await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
-    await vi.waitFor(() =>
-      expect(document.querySelector('[aria-label="Save this section"] button')?.getAttribute('aria-busy')).toBe('false')
-    );
-    expect(patchBody(patches(backend.calls)[0])).toEqual({ 'audio.volume': 0 });
 
-    buttonByText('Unmute').click();
-    flushSync();
-    expect(document.querySelector('.volume-field')?.textContent).toContain('55%');
-    buttonByText('Save').click();
-    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(2));
-    await vi.waitFor(() =>
-      expect(document.querySelector('[aria-label="Save this section"] button')?.getAttribute('aria-busy')).toBe('false')
-    );
-    expect(patchBody(patches(backend.calls)[1])).toEqual({ 'audio.volume': 55 });
+    expect(patchBody(patches(backend.calls)[0])).toEqual({ 'audio.muted': true });
+    expect(patchBody(patches(backend.calls)[0])).not.toHaveProperty('audio.volume', 0);
     expect(pathCalls(backend.calls, '/api/settings/test/audio')).toHaveLength(0);
   });
 
-  it('clamps master volume at 0 and 100 and has no dead self-test control', async () => {
+  it('clamps software volume at 100 and has no dead self-test control', async () => {
     const backend = await loadAndRender({ settings: { 'audio.volume': 100 } });
-    expect(buttonByAriaLabel('Increase Volume').disabled).toBe(true);
-    buttonByText('Mute').click();
-    flushSync();
-    expect(buttonByAriaLabel('Decrease Volume').disabled).toBe(true);
-    buttonByAriaLabel('Decrease Volume').click();
-    flushSync();
+    expect(buttonByAriaLabel('Increase Software volume').disabled).toBe(true);
+    expect(buttonByAriaLabel('Decrease Software volume').disabled).toBe(false);
 
-    expect(pageText()).toContain('0%');
     expect(pageText()).not.toContain('Self-test');
     expect(patches(backend.calls)).toHaveLength(0);
     expect(pathCalls(backend.calls, '/api/settings/test/audio')).toHaveLength(0);

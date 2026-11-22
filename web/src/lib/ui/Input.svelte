@@ -10,6 +10,7 @@
     type?: 'text' | 'password' | 'url' | 'email';
     inputmode?: HTMLInputAttributes['inputmode'];
     placeholder?: string;
+    maxlength?: number;
     hint?: string;
     error?: string;
     disabled?: boolean;
@@ -26,6 +27,7 @@
     type = 'text',
     inputmode,
     placeholder,
+    maxlength,
     hint,
     error,
     disabled = false,
@@ -71,6 +73,7 @@
       bind:value
       {inputmode}
       {placeholder}
+      {maxlength}
       {disabled}
       {required}
       {autocomplete}

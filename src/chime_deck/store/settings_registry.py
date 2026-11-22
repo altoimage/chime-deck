@@ -30,6 +30,7 @@ from .errors import SettingTypeError, SettingValueError, UnknownSettingKey
 
 __all__ = [
     "AUDIO_BACKEND_CHOICES",
+    "AUDIO_RAIL_TARGET_CHOICES",
     "LOCAL_ONLY_SETTING_KEYS",
     "LOG_LEVEL_CHOICES",
     "PROVIDER_SECRET_KEY_PREFIX",
@@ -58,6 +59,14 @@ shipped, so the registry no longer accepts or writes it. A database that still
 contains the old value (an older build or a hand edit) is repaired at startup
 by :class:`chime_deck.wiring.ChimePipeline`, which writes ``"mpv"`` back
 before any backend is built.
+"""
+
+AUDIO_RAIL_TARGET_CHOICES: Final = ("software", "hardware")
+"""Stored values for ``audio.rail_target``: which stage the control rail steps (cd-qul9).
+
+Audible loudness is software gain multiplied by the device's own control, so the
+rail has to step exactly one of them: ``software`` is ``audio.volume`` and
+``hardware`` is ``audio.hardware_volume``.
 """
 
 PROVIDER_SECRET_KEY_PREFIX: Final = "tts.providers."
@@ -218,7 +227,27 @@ _SPECS: Final = (
     SettingSpec("server.admin_password_hash", "", SettingType.STRING, secret=True, max_length=200),
     SettingSpec("audio.device_hint", "", SettingType.STRING, max_length=255),
     SettingSpec("audio.backend", "mpv", SettingType.STRING, choices=AUDIO_BACKEND_CHOICES),
-    SettingSpec("audio.volume", 70, SettingType.INTEGER, minimum=0, maximum=100),
+    SettingSpec("audio.volume", 100, SettingType.INTEGER, minimum=0, maximum=100),
+    # The second loudness stage: the resolved output's own playback control. 100
+    # is the default so the app starts by replacing an OS's arbitrary value (a USB
+    # DAC's Speaker control defaulted to 43%, which made a UI "100%" audibly half
+    # volume); an install that already stored a value keeps it. cd-qul9.
+    SettingSpec("audio.hardware_volume", 100, SettingType.INTEGER, minimum=0, maximum=100),
+    # Which stage the control rail's up/down steps: software gain or the device's
+    # own control. Two stages, one pair of buttons, so the target is explicit.
+    SettingSpec(
+        "audio.rail_target", "software", SettingType.STRING, choices=AUDIO_RAIL_TARGET_CHOICES
+    ),
+    # A USB card exposes several controls (Speaker, Mic, Auto Gain Control) and the
+    # one that is the output cannot be discovered from their order, so a manual
+    # name is possible; empty means auto-detect with a preference list. cd-qul9.
+    SettingSpec(
+        "audio.hardware_control",
+        "",
+        SettingType.STRING,
+        max_length=_MAX_DEVICE_NAME_LENGTH,
+        normaliser=_normalise_device_name,
+    ),
     # "Silence this device" (D28) is a state of its own, not a zero gain: mute
     # suppresses every press, quiet_hours_exempt ones included.
     SettingSpec("audio.muted", False, SettingType.BOOLEAN),

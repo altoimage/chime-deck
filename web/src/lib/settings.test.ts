@@ -58,7 +58,9 @@ describe('defaults', () => {
     expect(settings.hideCursor).toBe(true);
     expect(settings.showControlRail).toBe(true);
     expect(settings.dashboardColumns).toBe(0);
-    expect(settings.volume).toBe(70);
+    expect(settings.volume).toBe(100);
+    expect(settings.hardwareVolume).toBe(100);
+    expect(settings.railTarget).toBe('software');
     expect(settings.muted).toBe(false);
   });
 
@@ -73,7 +75,9 @@ describe('defaults', () => {
     expect(settings.hideCursor).toBe(true);
     expect(settings.showControlRail).toBe(true);
     expect(settings.dashboardColumns).toBe(0);
-    expect(settings.volume).toBe(70);
+    expect(settings.volume).toBe(100);
+    expect(settings.hardwareVolume).toBe(100);
+    expect(settings.railTarget).toBe('software');
   });
 
   it('ignores a value of the wrong type rather than rendering it', async () => {
@@ -98,7 +102,7 @@ describe('defaults', () => {
     expect(settings.hideCursor).toBe(true);
     expect(settings.showControlRail).toBe(true);
     expect(settings.dashboardColumns).toBe(0);
-    expect(settings.volume).toBe(70);
+    expect(settings.volume).toBe(100);
   });
 
   it('ignores an out-of-range column count and volume', async () => {
@@ -110,11 +114,21 @@ describe('defaults', () => {
     await settings.load();
 
     expect(settings.dashboardColumns).toBe(0);
-    expect(settings.volume).toBe(70);
+    expect(settings.volume).toBe(100);
   });
 });
 
 describe('values', () => {
+  it('falls back to software for an unreadable rail target', async () => {
+    setFetchImpl(
+      fakeFetch(response({ settings: { 'audio.rail_target': 'mixer' }, secrets: {} })).impl
+    );
+
+    await settings.load();
+
+    expect(settings.railTarget).toBe('software');
+  });
+
   it('honours the values the backend sent', async () => {
     setFetchImpl(
       fakeFetch(
@@ -274,7 +288,7 @@ describe('failures', () => {
 
     expect(settings.loaded).toBe(false);
     expect(settings.error).toBe('setting audio.volume expects an integer');
-    expect(settings.volume).toBe(70);
+    expect(settings.volume).toBe(100);
     expect(settings.showControlRail).toBe(true);
   });
 
@@ -293,6 +307,19 @@ describe('failures', () => {
     expect(fake.calls[0].init?.body).toBe('{"audio.volume":100}');
     expect(settings.volume).toBe(100);
     expect(settings.error).toBeNull();
+  });
+
+  it('PATCHes exactly the selected rail volume key', async () => {
+    const fake = fakeFetch(
+      response({ settings: { 'audio.rail_target': 'hardware', 'audio.hardware_volume': 45 }, secrets: {} })
+    );
+    setFetchImpl(fake.impl);
+    await settings.load();
+
+    await expect(settings.setRailVolume(45)).resolves.toBe(true);
+
+    expect(fake.calls).toHaveLength(2);
+    expect(fake.calls[1].init?.body).toBe('{"audio.hardware_volume":45}');
   });
 
   it('clamps a negative volume to zero', async () => {

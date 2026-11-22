@@ -126,6 +126,35 @@ test('the Audio panel saves the quiet-hours start hour through the real PATCH', 
   watch.assertAllLocal();
 });
 
+test('the Hardware volume stepper saves through the real settings PATCH', async ({
+  page,
+  request
+}) => {
+  // Start below the upper stop so the hardware Stepper has a real increase to
+  // make. This setup write is separate from the save driven through the UI.
+  const seeded = await request.patch('/api/settings', { data: { 'audio.hardware_volume': 40 } });
+  expect(seeded.ok(), await seeded.text()).toBe(true);
+
+  await page.goto('/settings/audio');
+  const hardwareVolume = page.getByRole('group', { name: 'Hardware volume' });
+  await expect(hardwareVolume).toContainText('40');
+  await expect(page.getByRole('slider', { name: 'Hardware volume' })).toBeEnabled();
+
+  const patched = page.waitForResponse(isSettingsPatch);
+  await hardwareVolume.getByRole('button', { name: 'Increase Hardware volume' }).click();
+  await saveButton(page).click();
+  const body = await patchBody(await patched);
+
+  expect(body.settings['audio.hardware_volume']).toBe(41);
+  await expect
+    .poll(async () => (await readSettings(request)).settings['audio.hardware_volume'])
+    .toBe(41);
+  await expect(hardwareVolume).toContainText('41');
+  await expect(saveButton(page)).toBeDisabled();
+
+  watch.assertAllLocal();
+});
+
 test('the icon picker stores an override through the real entity PATCH', async ({
   page,
   request

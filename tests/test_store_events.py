@@ -113,7 +113,7 @@ async def test_rolled_back_write_publishes_nothing(store: ConfigStore) -> None:
             raise RuntimeError("rollback")
 
     assert _drain(queue) == []
-    assert await store.get_setting("audio.volume") == 70
+    assert await store.get_setting("audio.volume") == 100
 
 
 async def test_raising_handler_does_not_break_the_write(
@@ -157,7 +157,7 @@ async def test_failing_commit_rolls_back_and_leaves_store_usable(
 
     assert commit_attempts == 1
     assert _drain(queue) == []
-    assert await store.get_setting("audio.volume") == 70
+    assert await store.get_setting("audio.volume") == 100
 
     await store.set_setting("ui.theme", "light")
 

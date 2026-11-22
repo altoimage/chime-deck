@@ -275,6 +275,11 @@ async function tapVolumeUp(page: Page, expected: number): Promise<void> {
 }
 
 test('volume taps step exactly five points and clamp at the top', async ({ page, request }) => {
+  // Preserve this test's useful starting value after the registry default moved
+  // from 70 to 100 in cd-qul9.
+  const seededVolume = await request.patch('/api/settings', { data: { 'audio.volume': 70 } });
+  expect(seededVolume.ok(), await seededVolume.text()).toBe(true);
+
   await page.goto('/');
   await expect(page.locator(LIVE_TILES)).toHaveCount(SEED.length);
 
@@ -313,7 +318,7 @@ test('volume taps step exactly five points and clamp at the top', async ({ page,
 
   // `/__test/reset` does not restore `audio.volume`; this spec does, so the
   // next test (and the next run) starts from the registry default.
-  const restore = await request.patch('/api/settings', { data: { 'audio.volume': 70 } });
+  const restore = await request.patch('/api/settings', { data: { 'audio.volume': 100 } });
   expect(restore.ok(), await restore.text()).toBe(true);
 
   watch.assertAllLocal();

@@ -6,12 +6,21 @@ implementation; ``AudioBackend`` is the protocol the playback worker (HSD-kfnd)
 depends on. :func:`tone_wav_bytes` generates the verification tone the settings
 page's "Play test tone" plays (HSD-wpm0).
 
-Owning ticket: HSD-h13q; the verification tone was added by HSD-wpm0.
+Owning ticket: HSD-h13q; the verification tone was added by HSD-wpm0 and the
+device's own volume control by cd-qul9.
 """
 
 from __future__ import annotations
 
 from .backend import AudioBackend
+from .commands import (
+    COMMAND_TIMEOUT_S,
+    DEFAULT_SPAWN,
+    CommandResult,
+    CommandSpawner,
+    SpawnedProcess,
+    run_command,
+)
 from .devices import SYSTEM_DEFAULT_DEVICE, AudioDevice, hostapi_of, resolve_device
 from .errors import (
     AudioBackendNotStarted,
@@ -24,6 +33,12 @@ from .errors import (
     PlaybackError,
     PlaybackInProgressError,
     UnsupportedFormatError,
+)
+from .hardware import (
+    HARDWARE_NOT_STARTED_TEXT,
+    NO_HARDWARE_CONTROL_TEXT,
+    HardwareVolume,
+    HardwareVolumeStatus,
 )
 from .mpv_backend import (
     DEFAULT_START_TIMEOUT_S,
@@ -46,7 +61,11 @@ from .tone import (
 )
 
 __all__ = [
+    "COMMAND_TIMEOUT_S",
+    "DEFAULT_SPAWN",
     "DEFAULT_START_TIMEOUT_S",
+    "HARDWARE_NOT_STARTED_TEXT",
+    "NO_HARDWARE_CONTROL_TEXT",
     "SYSTEM_DEFAULT_DEVICE",
     "TONE_AMPLITUDE",
     "TONE_DURATION_S",
@@ -61,6 +80,10 @@ __all__ = [
     "AudioError",
     "AudioOperationError",
     "AudioPermissionError",
+    "CommandResult",
+    "CommandSpawner",
+    "HardwareVolume",
+    "HardwareVolumeStatus",
     "MissingAudioFileError",
     "MpvBackend",
     "MpvEvent",
@@ -70,9 +93,11 @@ __all__ = [
     "NoAudioDeviceError",
     "PlaybackError",
     "PlaybackInProgressError",
+    "SpawnedProcess",
     "UnsupportedFormatError",
     "hostapi_of",
     "resolve_device",
+    "run_command",
     "tone_wav_bytes",
     "warm_library",
     "write_test_tone",

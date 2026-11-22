@@ -226,7 +226,7 @@ async def test_dry_run_writes_nothing(source: ConfigStore, tmp_path: Path) -> No
         assert await target.list_entities() == []
         assert await target.list_sounds() == []
         assert await target.list_buttons() == []
-        assert await target.get_setting("audio.volume") == 70
+        assert await target.get_setting("audio.volume") == 100
         assert queue.empty()
 
 
@@ -279,7 +279,7 @@ async def test_import_accumulates_all_problems_and_writes_nothing(
         assert await target.list_entities() == []
         assert await target.list_sounds() == []
         assert await target.list_buttons() == []
-        assert await target.get_setting("audio.volume") == 70
+        assert await target.get_setting("audio.volume") == 100
 
 
 async def test_import_merges_and_resolves_existing_sounds(
@@ -450,7 +450,7 @@ async def test_import_refuses_a_document_that_carries_the_password_hash(
         assert "set the password from the settings page" in problems
         assert _STORED_HASH not in problems
         assert await target.get_setting(_ADMIN_PASSWORD_HASH_KEY) == _STORED_HASH
-        assert await target.get_setting("audio.volume") == 70
+        assert await target.get_setting("audio.volume") == 100
 
 
 async def test_import_rejects_a_provider_key_that_is_not_a_string(tmp_path: Path) -> None:

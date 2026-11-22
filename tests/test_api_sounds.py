@@ -475,7 +475,7 @@ async def test_press_of_a_scanned_relative_row_plays_the_library_file(
         assert response.status_code == 200
         await wait_until(lambda: len(fake_backend.played) == 1, timeout=_PLAY_TIMEOUT_S)
 
-    assert fake_backend.played == [(tmp_path / "sounds" / "ding.wav", 70)]
+    assert fake_backend.played == [(tmp_path / "sounds" / "ding.wav", 100)]
     assert path.is_file()
 
 

@@ -352,7 +352,7 @@ async def test_sound_press_queues_one_job_and_records_one_row(
     assert job.button_id == button.id
     assert job.button_name == "Front Door"
     assert job.path == tmp_path / "Front Door.mp3"
-    assert job.volume == 70
+    assert job.volume == 100
 
     messages = await _settle(hub, client)
     presses = _presses(messages)
@@ -674,7 +674,7 @@ async def test_exempt_button_plays_during_quiet_hours(
 
     assert result.outcome is PressOutcome.QUEUED
     assert len(dispatcher.jobs) == 1
-    assert dispatcher.jobs[0].volume == 70
+    assert dispatcher.jobs[0].volume == 100
 
 
 async def test_quiet_hours_with_zero_volume_suppresses_the_press(
@@ -840,7 +840,7 @@ async def test_unmuting_restores_muted_and_exempt_presses(
 
     assert third.outcome is PressOutcome.QUEUED
     assert fourth.outcome is PressOutcome.QUEUED
-    assert [job.volume for job in dispatcher.jobs] == [70, 70]
+    assert [job.volume for job in dispatcher.jobs] == [100, 100]
 
 
 async def test_dedupe_is_evaluated_before_mute(

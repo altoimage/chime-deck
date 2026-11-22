@@ -18,16 +18,16 @@
  *     would never enter that window, so promising a silent night would be a lie.
  *   - the crossed speaker appears when `audio.muted` is on — the deliberate
  *     "silence this device" state, which outranks quiet hours and the exempt
- *     rule (D28, `PressOutcome.SUPPRESSED_MUTED`) — or when the master gain is
- *     already zero (`isMuted(volume)`), because both mean the same thing to
- *     someone standing at the panel: it will not make a sound.
+ *     rule (D28, `PressOutcome.SUPPRESSED_MUTED`) — or when either software gain
+ *     or the hardware control is zero: the device is fully down by any means,
+ *     so it will not make a sound.
  *
  * Pure module: no runes, no DOM, no fetching. The component reads the settings
  * store and the clock; this decides what the badges say.
  */
 
 import { type ClockTime, inQuietWindow, parseClockTime } from './quiet-hours.js';
-import { isMuted } from './volume.js';
+import { isSilent } from './volume.js';
 
 /** Everything the header badges depend on, one value per registry key. */
 export interface BadgeInput {
@@ -43,15 +43,17 @@ export interface BadgeInput {
   quietVolume: number;
   /** `audio.muted` — the device-wide silence state (HSD-1lud). */
   muted: boolean;
-  /** `audio.volume`, 0..100; zero is zero gain. */
+  /** `audio.volume`, 0..100; zero is zero software gain. */
   volume: number;
+  /** `audio.hardware_volume`, 0..100; zero is zero device gain. */
+  hardwareVolume: number;
 }
 
 /** Which header badges are active. Both are hidden when false. */
 export interface HeaderBadges {
   /** Moon: quiet hours are suppressing sound at `now`. */
   quietHours: boolean;
-  /** Crossed speaker: muted, or at zero gain. */
+  /** Crossed speaker: fully down by any means (mute or either stage at zero). */
   muted: boolean;
 }
 
@@ -76,6 +78,10 @@ export function headerBadges(input: BadgeInput): HeaderBadges {
 
   return {
     quietHours,
-    muted: input.muted || isMuted(input.volume)
+    muted: isSilent({
+      muted: input.muted,
+      volume: input.volume,
+      hardwareVolume: input.hardwareVolume
+    })
   };
 }

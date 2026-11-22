@@ -1,4 +1,4 @@
-"""Audio API: list the output devices the speaker can see and resolve the stored hint.
+"""Audio API: list the output devices, resolve the stored hint and read the device level.
 
 ``GET /api/audio/devices`` asks the started
 :class:`~chime_deck.audio.AudioBackend` for its device list and reports what
@@ -6,13 +6,19 @@ the stored ``audio.device_hint`` resolves to. It is what the settings page needs
 to tell the user "the hint you typed matches nothing, mpv will use the system
 default" before a chime is ever pressed.
 
+``GET /api/audio/hardware`` reports the resolved output's own volume control —
+the second loudness stage cd-qul9 made the app own — together with the level the
+settings ask for (``configured``) and the level the last apply really wrote
+(``applied``). Showing both in one response is the point: the original bug was a
+UI that said 100% while the DAC said 43%.
+
 The route owns no device logic: :meth:`AudioBackend.list_devices` is the same
 call the playback worker's backend uses, and
 :func:`~chime_deck.audio.resolve_device` is the same matcher the backend
 applies when it selects a device, so the list and the playback cannot disagree
 about which output a hint names.
 
-Four behaviours are deliberate and must not be "fixed":
+Six behaviours are deliberate and must not be "fixed":
 
 * **HTTP 200 carries the verdict.** A discovery that ran and failed answers 200
   with ``ok: false`` and prose saying so, exactly like
@@ -27,6 +33,14 @@ Four behaviours are deliberate and must not be "fixed":
 * **``resolved_device`` is always a real device NAME** (or ``null``), never a
   description or a friendly label: the name is the value written back to the
   player.
+* **The hardware route is read-only.** A ``GET`` that changed a system mixer
+  would be a surprise, so it calls ``read_hardware()`` and never ``apply()``;
+  startup, a settings change and a device change do the writing.
+* **``GET /api/audio/hardware`` carries its verdict on 200 too.** An output with
+  no hardware volume control (an HDMI ``IEC958`` switch, for instance) answers
+  ``ok: true, available: false`` with its reason: that is an honest answer about
+  the host, not a failed request. Only a genuine failure to ask at all — the
+  audio engine not started, a store read that failed — is ``ok: false``.
 
 Every string that enters the response is scrubbed with
 :data:`~chime_deck.config.SECRET_SCRUBBER`, so a host that echoes a
@@ -43,7 +57,13 @@ from typing import TYPE_CHECKING, Final
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from ..audio import SYSTEM_DEFAULT_DEVICE, AudioError, resolve_device
+from ..audio import (
+    NO_HARDWARE_CONTROL_TEXT,
+    SYSTEM_DEFAULT_DEVICE,
+    AudioError,
+    HardwareVolumeStatus,
+    resolve_device,
+)
 from ..config import SECRET_SCRUBBER
 
 if TYPE_CHECKING:
@@ -53,6 +73,7 @@ __all__ = [
     "AUDIO_NOT_STARTED_TEXT",
     "AudioDeviceModel",
     "AudioDevicesResponse",
+    "HardwareVolumeResponse",
     "build_audio_router",
 ]
 
@@ -67,6 +88,15 @@ _TIMEOUT_TEXT: Final = (
     "and the application log, then try again"
 )
 _DISCOVERY_FAILED_TEXT: Final = "audio device discovery failed: {detail}"
+_HARDWARE_READ_FAILED_TEXT: Final = "the device's own volume control could not be read: {detail}"
+
+_HARDWARE_ANSWERS: Final = (NO_HARDWARE_CONTROL_TEXT, "no control matching")
+"""Reason prefixes that are an answer about the host rather than a failure to ask.
+
+``no hardware volume control`` is the HDMI-style output; ``no control matching``
+is a stored ``audio.hardware_control`` that names nothing on this device. Both
+are deliberate outcomes of a read that ran, so both are ``ok: true``.
+"""
 
 
 class AudioDeviceModel(BaseModel):
@@ -80,6 +110,32 @@ class AudioDeviceModel(BaseModel):
     name: str
     hostapi: str
     is_default: bool
+
+
+class HardwareVolumeResponse(BaseModel):
+    """The device's own volume control, what the settings ask for, and what was written.
+
+    ``available`` is true only when a control was found and read, so ``percent``
+    is the value actually on the device and ``reason`` is ``""``. ``device`` is
+    the resolved output's mpv name and ``control`` the ALSA simple-mixer control
+    or the Pulse/PipeWire sink. ``configured`` echoes the stored
+    ``audio.hardware_volume`` so the panel can show "you asked for 100, the device
+    says 43" in one glance; ``applied`` is the percent the last apply of this
+    process actually wrote, or ``None`` when that call wrote nothing. ``ok`` is
+    false only when the route could not get an answer at all: an output with no
+    hardware volume control is an answer and reports ``available: false`` with its
+    reason.
+    """
+
+    ok: bool
+    available: bool
+    device: str | None = None
+    control: str | None = None
+    percent: int | None = None
+    muted: bool = False
+    reason: str = ""
+    configured: int | None = None
+    applied: int | None = None
 
 
 class AudioDevicesResponse(BaseModel):
@@ -107,6 +163,21 @@ def _scrub(value: str) -> str:
     :param value: prose, a device name or an exception message about to be returned.
     """
     return SECRET_SCRUBBER.scrub(value)
+
+
+def _hardware_answer(status: HardwareVolumeStatus) -> bool:
+    """Return whether a hardware-volume status is an answer rather than a failure.
+
+    ``available`` is the easy case. An unavailable status is still an answer when
+    the reason is about the output itself (no control, or a stored control name
+    that matches nothing); anything else — a missing utility, a timeout, an
+    unparseable value, a store failure — means the route could not ask.
+
+    :param status: the status the hardware service returned.
+    """
+    if status.available:
+        return True
+    return status.reason.startswith(_HARDWARE_ANSWERS)
 
 
 def build_audio_router(state: AppState) -> APIRouter:
@@ -169,6 +240,39 @@ def build_audio_router(state: AppState) -> APIRouter:
                 for device in devices
             ],
             error=None,
+        )
+
+    @router.get("/hardware")
+    async def read_hardware_volume() -> HardwareVolumeResponse:
+        """Report the device's own volume control without writing it.
+
+        Read-only by contract: the route calls ``read_hardware()``, never
+        ``apply()``. ``ok`` carries the verdict on HTTP 200 — an output with no
+        hardware volume control, or a stored control name that matches nothing,
+        is an answer and therefore ``ok: true, available: false`` — while only a
+        failure to ask at all is ``ok: false``. A pipeline whose backend has not
+        started answers honestly instead of raising, so this route can never 500.
+        """
+        if state.chime.backend is None:
+            return HardwareVolumeResponse(
+                ok=False, available=False, reason=_scrub(AUDIO_NOT_STARTED_TEXT)
+            )
+        try:
+            stored = await state.store.get_setting("audio.hardware_volume")
+        except Exception as exc:
+            prose = _HARDWARE_READ_FAILED_TEXT.format(detail=exc)
+            return HardwareVolumeResponse(ok=False, available=False, reason=_scrub(prose))
+        status = await state.chime.read_hardware()
+        return HardwareVolumeResponse(
+            ok=_hardware_answer(status),
+            available=status.available,
+            device=None if status.device is None else _scrub(status.device),
+            control=None if status.control is None else _scrub(status.control),
+            percent=status.percent,
+            muted=status.muted,
+            reason=_scrub(status.reason),
+            configured=stored if isinstance(stored, int) and not isinstance(stored, bool) else None,
+            applied=status.applied,
         )
 
     return router

@@ -140,6 +140,8 @@ def test_every_empty_pattern_string_has_a_sample() -> None:
     [
         ("audio.volume", -1, "must be at least 0, got -1"),
         ("audio.volume", 101, "must be at most 100, got 101"),
+        ("audio.hardware_volume", -1, "must be at least 0, got -1"),
+        ("audio.hardware_volume", 101, "must be at most 100, got 101"),
         ("audio.wake_lead_in_ms", -1, "must be at least 0, got -1"),
         ("audio.wake_lead_in_ms", 10001, "must be at most 10000, got 10001"),
         ("mqtt.port", 0, "must be at least 1, got 0"),
@@ -178,6 +180,8 @@ def test_integer_out_of_range_is_rejected(key: str, value: int, reason: str) -> 
     [
         ("audio.volume", 0),
         ("audio.volume", 100),
+        ("audio.hardware_volume", 0),
+        ("audio.hardware_volume", 100),
         ("audio.wake_lead_in_ms", 0),
         ("audio.wake_lead_in_ms", 10000),
         ("mqtt.port", 1),
@@ -213,6 +217,7 @@ def test_integer_boundaries_are_accepted(key: str, value: int) -> None:
         ("ui.theme", "purple"),
         ("audio.backend", "alsa"),
         ("audio.backend", "sounddevice"),
+        ("audio.rail_target", "both"),
     ],
 )
 def test_choices_are_enforced(key: str, value: str) -> None:
@@ -361,6 +366,30 @@ def test_device_name_defaults_to_the_product_name() -> None:
     assert SETTINGS["device.name"].type is SettingType.STRING
 
 
+def test_both_loudness_stages_default_to_full_and_the_rail_to_software() -> None:
+    """cd-qul9: the app owns both stages, so a fresh install has nothing held back.
+
+    ``audio.volume`` was 70 before this ticket, which is exactly half the reason a
+    UI said 100% while the speaker was quieter than requested; a stored value is
+    never rewritten, so existing installs keep what they deliberately chose.
+    """
+    assert SETTINGS["audio.volume"].default == 100
+    assert SETTINGS["audio.hardware_volume"].default == 100
+    assert SETTINGS["audio.rail_target"].default == "software"
+    assert SETTINGS["audio.hardware_control"].default == ""
+
+
+def test_the_stored_hardware_control_is_trimmed_and_length_capped() -> None:
+    """The manual control name is an ordinary trimmed string with the device-name cap."""
+    assert normalise_value("audio.hardware_control", "  Speaker  ") == "Speaker"
+
+    with pytest.raises(SettingValueError) as exc_info:
+        validate_value("audio.hardware_control", "s" * 65)
+
+    assert exc_info.value.key == "audio.hardware_control"
+    assert "at most 64 characters" in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     ("submitted", "stored"),
     [
@@ -452,7 +481,7 @@ async def test_store_rejects_a_value_the_registry_forbids(store: ConfigStore) ->
         await store.set_setting("audio.volume", 101)
 
     assert exc_info.value.key == "audio.volume"
-    assert await store.get_setting("audio.volume") == 70
+    assert await store.get_setting("audio.volume") == 100
 
 
 _VALID_PROVIDER_ID = "0123456789ab"

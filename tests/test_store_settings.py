@@ -38,7 +38,7 @@ async def store(tmp_path: Path) -> AsyncIterator[ConfigStore]:
 
 async def test_defaults_are_returned(store: ConfigStore) -> None:
     """Unset keys return their registry defaults with the right type."""
-    assert await store.get_setting("audio.volume") == 70
+    assert await store.get_setting("audio.volume") == 100
     assert await store.get_setting("audio.wake_lead_in_ms") == 1500
     assert await store.get_setting("mqtt.tls") is False
     assert await store.get_setting("ui.hide_cursor") is True
@@ -46,7 +46,7 @@ async def test_defaults_are_returned(store: ConfigStore) -> None:
     assert await store.get_setting("ha.base_url") == "http://homeassistant.local:8123"
 
     settings = await store.all_settings()
-    assert settings["audio.volume"] == 70
+    assert settings["audio.volume"] == 100
     assert settings["buttons.default_dedupe_seconds"] == 3
 
 

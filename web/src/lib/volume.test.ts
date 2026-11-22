@@ -10,7 +10,40 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_VOLUME, VOLUME_STEP, clampVolume, isMuted, stepVolume, unmuteTarget } from './volume.js';
+import {
+  DEFAULT_HARDWARE_VOLUME,
+  DEFAULT_RAIL_TARGET,
+  DEFAULT_VOLUME,
+  RAIL_TARGETS,
+  VOLUME_STEP,
+  clampVolume,
+  isMuted,
+  isRailTarget,
+  isSilent,
+  railVolumeKey,
+  stepVolume,
+  unmuteTarget
+} from './volume.js';
+
+describe('volume defaults and rail target', () => {
+  it('uses 100 for both volume defaults and software for the rail', () => {
+    expect(DEFAULT_VOLUME).toBe(100);
+    expect(DEFAULT_HARDWARE_VOLUME).toBe(100);
+    expect(RAIL_TARGETS).toEqual(['software', 'hardware']);
+    expect(DEFAULT_RAIL_TARGET).toBe('software');
+  });
+
+  it('maps each rail target to exactly one setting key', () => {
+    expect(railVolumeKey('software')).toBe('audio.volume');
+    expect(railVolumeKey('hardware')).toBe('audio.hardware_volume');
+  });
+
+  it('recognises only supported rail targets', () => {
+    expect(isRailTarget('software')).toBe(true);
+    expect(isRailTarget('hardware')).toBe(true);
+    expect(isRailTarget('mixer')).toBe(false);
+  });
+});
 
 describe('clampVolume', () => {
   it('turns a non-finite value into the registry default, never into silence', () => {
@@ -38,6 +71,15 @@ describe('isMuted', () => {
   it('treats any audible volume as unmuted', () => {
     expect(isMuted(1)).toBe(false);
     expect(isMuted(70)).toBe(false);
+  });
+});
+
+describe('isSilent', () => {
+  it('answers the device-wide crossed-speaker predicate', () => {
+    expect(isSilent({ muted: true, volume: 100, hardwareVolume: 100 })).toBe(true);
+    expect(isSilent({ muted: false, volume: 0, hardwareVolume: 100 })).toBe(true);
+    expect(isSilent({ muted: false, volume: 100, hardwareVolume: 0 })).toBe(true);
+    expect(isSilent({ muted: false, volume: 100, hardwareVolume: 100 })).toBe(false);
   });
 });
 
@@ -69,7 +111,7 @@ describe('stepVolume', () => {
   });
 
   it('treats a non-finite reading as the default before stepping', () => {
-    expect(stepVolume(Number.NaN, 'up')).toBe(DEFAULT_VOLUME + VOLUME_STEP);
+    expect(stepVolume(Number.NaN, 'up')).toBe(DEFAULT_VOLUME);
     expect(stepVolume(Number.POSITIVE_INFINITY, 'down')).toBe(DEFAULT_VOLUME - VOLUME_STEP);
   });
 });
