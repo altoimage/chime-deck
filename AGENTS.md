@@ -202,6 +202,21 @@ belong in a public repository.
 - **A desktop session must never be re-enabled on that board** — `kwin_wayland` owning
   `/dev/dri/card0` was the root cause of a day of misdiagnosed display failures (`design/06` §5.1b).
 
+## HARD RULE 10 — oracle probe safety and model fallback
+
+Oracle is a read-only advisor that writes throwaway probe scripts. Twice it stalled an entire batch
+with one: an unbounded `wait $PID`, and a non-daemon thread left alive at interpreter shutdown.
+
+- Every ad-hoc command is bounded: `timeout 60 .venv/bin/python /tmp/probe.py`, never a bare
+  `python script.py`. Close every client, executor, subprocess and store in a `finally`.
+- A probe that has printed its results has finished. If the interpreter does not exit within the
+  bound, kill it and treat the non-exit as the finding.
+- Oracle is pinned to a local `vllm3` endpoint. If a gate fails with a connection error, re-dispatch
+  that same gate **once** with `model: "opencode-go/qwen3.8-flash"`, then
+  `model: "opencode-go/kimi-k3"`, then stop the batch. Never `github-copilot` (credits exhausted).
+  Never switch pre-emptively while vllm3 is reachable, and say in the report which model served each
+  gate.
+
 ## Verification commands
 
 Run these from the repo root, bounded:
