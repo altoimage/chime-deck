@@ -469,7 +469,7 @@ async def test_other_topics_are_forwarded_to_the_message_seam() -> None:
     broker = FakeBroker()
     received: list[tuple[str, bytes]] = []
 
-    async def on_message(topic: str, payload: bytes) -> None:
+    async def on_message(topic: str, payload: bytes, retain: bool) -> None:
         received.append((topic, payload))
 
     harness = _bridge(broker, on_message=on_message)
@@ -484,6 +484,32 @@ async def test_other_topics_are_forwarded_to_the_message_seam() -> None:
     assert received == [(CUSTOM_TOPIC, b"\x00PRESS")]
     assert isinstance(received[0][0], str)
     assert isinstance(received[0][1], bytes)
+
+
+async def test_the_broker_retain_flag_reaches_the_message_seam() -> None:
+    """A broker replay arrives with ``retain=True``; a live publish with ``False``.
+
+    The flag describes *this delivery*, not the publisher's intent, so the bridge
+    has to carry it across the paho-to-event-loop hop: a consumer cannot recover
+    it from the topic or the payload, and a replayed selection command must be
+    refusable as an old intent (D34).
+    """
+    broker = FakeBroker()
+    received: list[tuple[str, bytes, bool]] = []
+
+    async def on_message(topic: str, payload: bytes, retain: bool) -> None:
+        received.append((topic, payload, retain))
+
+    harness = _bridge(broker, on_message=on_message)
+    await _start_connected(harness)
+    harness.bridge.subscribe(CUSTOM_TOPIC, qos=1)
+
+    broker.deliver(CUSTOM_TOPIC, b"on", retain=True)
+    await wait_until(lambda: bool(received))
+    broker.deliver(CUSTOM_TOPIC, b"off", retain=False)
+    await wait_until(lambda: len(received) == 2)
+
+    assert received == [(CUSTOM_TOPIC, b"on", True), (CUSTOM_TOPIC, b"off", False)]
 
 
 # -------------------------------------------------------------------------- health
@@ -1048,7 +1074,7 @@ async def test_a_message_callback_installed_after_start_is_used() -> None:
     harness = _bridge(broker)
     received: list[tuple[str, bytes]] = []
 
-    async def on_message(topic: str, payload: bytes) -> None:
+    async def on_message(topic: str, payload: bytes, retain: bool) -> None:
         received.append((topic, payload))
 
     await _start_connected(harness)
@@ -1079,7 +1105,7 @@ async def test_setting_a_callback_while_stopping_is_refused(
     async def seam_b() -> None:
         broker.events.append(("birth-b",))
 
-    async def message_seam_b(topic: str, payload: bytes) -> None:
+    async def message_seam_b(topic: str, payload: bytes, retain: bool) -> None:
         broker.events.append(("message-b", topic, payload))
 
     harness.bridge.set_on_birth(seam_b)

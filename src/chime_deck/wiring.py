@@ -79,7 +79,7 @@ from .mqtt import (
 )
 from .playback import HubPlaybackRecorder, PlaybackWorker
 from .press import PressService, SpeechSource
-from .selection import NO_SELECTION, SelectionLookup
+from .selection import NO_SELECTION, SelectionWriter
 from .store import ConfigStore
 from .store.events import ConfigEvent, ConfigEventName
 from .store.settings_registry import AUDIO_BACKEND_CHOICES
@@ -336,7 +336,7 @@ class ChimePipeline:
         health: HealthRegistry,
         config: ServerConfig,
         wiring: Wiring,
-        selection: SelectionLookup = NO_SELECTION,
+        selection: SelectionWriter = NO_SELECTION,
     ) -> None:
         """Prepare the pipeline; nothing runs until :meth:`start` is awaited.
 
@@ -346,8 +346,9 @@ class ChimePipeline:
         :param config: resolved server configuration; its host and port (never
             the ``server.*`` settings) are published in the discovery payload.
         :param wiring: injectable devices; :func:`default_wiring` in production.
-        :param selection: the volatile D29 tile selection the discovery service
-            reads to republish the selection sensors' state.
+        :param selection: the volatile tile selection the discovery service
+            *reads* to republish a switch's state and *writes* when Home Assistant
+            sends a command (D34).
 
         The logger is ``logging.getLogger(__name__)``, created last.
         """

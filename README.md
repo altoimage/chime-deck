@@ -185,7 +185,7 @@ so "played" there still is not "heard". The full reference is
 | `tests/` | pytest suite (unit, integration and slow markers) |
 | `web/` | Svelte 5 frontend; tokens and component kit built, screens in progress (the built bundle is committed in `web/dist/`) |
 | `deploy/` | systemd user units (`chime-deck.service`, `chime-deck-kiosk.service`), the kiosk wrapper and its autostart entry, and the Docker compose file (`docker-compose.yml`) |
-| `docs/` | Operator guides: [`installing.md`](docs/installing.md), [`kiosk.md`](docs/kiosk.md), [`releasing.md`](docs/releasing.md) |
+| `docs/` | Operator guides: [`installing.md`](docs/installing.md), [`home-assistant.md`](docs/home-assistant.md), [`kiosk.md`](docs/kiosk.md), [`releasing.md`](docs/releasing.md) |
 | `Dockerfile` | Multi-stage build from the repo root: the product image, the `:piper` tag and the integration harness, all from one file |
 | `data/` | Runtime state: database, sounds, icons, TTS cache (*git-ignored*) |
 | `Project_state/` | Architecture, design docs and decisions (*git-ignored*) |

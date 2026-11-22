@@ -53,6 +53,7 @@ from chime_deck.mqtt import (
     selection_state_topic,
     selection_unique_id,
 )
+from chime_deck.mqtt.discovery import selection_read_only_discovery_topic
 from chime_deck.selection import SelectionService
 from chime_deck.store import Button, ConfigStore, Entity, EntityIn
 
@@ -98,28 +99,44 @@ nameless tile still gets its pre-HSD-jw0x slug.
 DRYER_NODERED: Final = "sensor.dryer_nodered_d90a5b74cba48067"
 """Entity id of the tile HSD-jw0x names "Dryer" — the ticket's headline example."""
 
-CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_front_door/config"
-"""Discovery topic of the first tile's selection sensor."""
+CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_front_door/config"
+"""Discovery topic of the first tile's writable selection switch (D34)."""
 
-DRYER_CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_sensor_dryer/config"
-"""Discovery topic of the second tile's selection sensor."""
+DRYER_CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_sensor_dryer/config"
+"""Discovery topic of the second tile's selection switch."""
 
-LEGACY_CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_lock_front_door/config"
+LEGACY_CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_lock_front_door/config"
 """Discovery topic the first tile had BEFORE HSD-jw0x, purged on upgrade."""
 
-NAMED_DRYER_CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_dryer/config"
+NAMED_DRYER_CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_dryer/config"
 """Discovery topic of a tile named "Dryer"."""
 
-SECOND_DRYER_CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_dryer_2/config"
+SECOND_DRYER_CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_dryer_2/config"
 """Discovery topic of the second of two tiles named "Dryer"."""
 
-WASHER_CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_washing_machine/config"
+WASHER_CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_washing_machine/config"
 """Discovery topic of a tile named "Washing Machine"."""
 
-RENAMED_CONFIG_TOPIC: Final = (
+RENAMED_CONFIG_TOPIC: Final = "homeassistant/switch/chime_deck_default_front_door_lock/config"
+"""Discovery topic after "Front Door" is renamed "Front Door Lock"."""
+
+READ_ONLY_CONFIG_TOPIC: Final = "homeassistant/binary_sensor/chime_deck_default_front_door/config"
+"""PRE-D34 read-only config of the first tile, blanked before the switch is announced."""
+
+READ_ONLY_DRYER_CONFIG_TOPIC: Final = (
+    "homeassistant/binary_sensor/chime_deck_default_sensor_dryer/config"
+)
+"""PRE-D34 read-only config of the second tile."""
+
+READ_ONLY_LEGACY_CONFIG_TOPIC: Final = (
+    "homeassistant/binary_sensor/chime_deck_default_lock_front_door/config"
+)
+"""PRE-D34 read-only config the first tile had BEFORE HSD-jw0x."""
+
+READ_ONLY_RENAMED_CONFIG_TOPIC: Final = (
     "homeassistant/binary_sensor/chime_deck_default_front_door_lock/config"
 )
-"""Discovery topic after "Front Door" is renamed "Front Door Lock"."""
+"""PRE-D34 read-only config after "Front Door" is renamed "Front Door Lock"."""
 
 STATE_TOPIC: Final = "chime_deck/default/selection/front_door"
 """Retained state topic of the first tile's selection sensor."""
@@ -469,21 +486,39 @@ async def test_the_lan_payload_matches_the_golden_file() -> None:
     assert json.loads(encode_payload(payload)) == payload
 
 
-async def test_the_selection_payload_carries_no_command_topic(harness: Harness) -> None:
-    """The sensor is read-only: no command topic, device class or entity category.
+async def test_the_selection_payload_is_a_writable_switch(harness: Harness) -> None:
+    """D34's entity is a writable ``switch``: it carries a command topic and both states.
+
+    The inverted premise of the pre-D34 test: the payload used to be a read-only
+    ``binary_sensor`` with no command topic. Now Home Assistant can write the
+    value, so ``command_topic``, ``state_on``/``state_off`` and
+    ``payload_on``/``payload_off`` must all be present, the preferred entity id
+    must be a ``switch``, and the fields §9 deliberately omits (a device class,
+    ``qos``, ``retain``, an entity category) must stay absent.
 
     :param harness: the stack under test.
     """
     payload = _selection_payload_for("127.0.0.1", 8080)
-    assert "command_topic" not in payload
-    assert "device_class" not in payload
-    assert "entity_category" not in payload
+    assert payload["command_topic"] == "chime_deck/default/selection/front_door/set"
+    assert payload["state_on"] == "on"
+    assert payload["state_off"] == "off"
+    assert payload["payload_on"] == "on"
+    assert payload["payload_off"] == "off"
+    assert payload["default_entity_id"] == "switch.chime_deck_front_door"
+    for absent in ("device_class", "qos", "retain", "entity_category"):
+        assert absent not in payload
+    assert tuple(payload) == SELECTION_KEY_ORDER
 
     await _connect(harness)
     published = _parsed(harness, CONFIG_TOPIC)
-    assert "command_topic" not in published
-    assert "device_class" not in published
-    assert "entity_category" not in published
+    assert published["command_topic"] == "chime_deck/default/selection/front_door/set"
+    assert published["state_on"] == "on"
+    assert published["state_off"] == "off"
+    assert published["payload_on"] == "on"
+    assert published["payload_off"] == "off"
+    assert published["default_entity_id"] == "switch.chime_deck_front_door"
+    for absent in ("device_class", "qos", "retain", "entity_category"):
+        assert absent not in published
     assert tuple(published) == SELECTION_KEY_ORDER
 
 
@@ -514,7 +549,7 @@ async def test_the_dryer_payload_matches_the_golden_file() -> None:
     assert tuple(payload) == SELECTION_KEY_ORDER
     assert tuple(cast("Mapping[str, object]", json.loads(text))) == SELECTION_KEY_ORDER
     assert payload["name"] == "Dryer selected"
-    assert payload["default_entity_id"] == "binary_sensor.chime_deck_dryer"
+    assert payload["default_entity_id"] == "switch.chime_deck_dryer"
     assert payload["state_topic"] == "chime_deck/default/selection/dryer"
     assert json.loads(encode_payload(payload)) == payload
 
@@ -532,7 +567,7 @@ async def test_the_entity_slug_is_a_valid_home_assistant_object_id() -> None:
     assert "-" not in slug
     assert selection_unique_id(_settings(), slug) == "chime_deck_default_front_door_selected"
     assert selection_state_topic(_settings(), slug) == STATE_TOPIC
-    assert selection_default_entity_id(slug) == "binary_sensor.chime_deck_front_door"
+    assert selection_default_entity_id(slug) == "switch.chime_deck_front_door"
     assert selection_discovery_topic(_settings(), slug) == CONFIG_TOPIC
     assert "-" not in selection_default_entity_id(slug).split(".", 1)[1]
 
@@ -572,6 +607,70 @@ async def test_start_publishes_the_config_unretained_and_the_state_retained(
         DRYER_STATE_TOPIC,
         "off",
         SELECTION_STATE_QOS,
+        True,
+    )
+
+
+async def test_start_blanks_the_read_only_config_with_a_retained_empty_payload(
+    harness: Harness,
+) -> None:
+    """The pre-D34 ``binary_sensor`` config is removed with a RETAINED empty payload.
+
+    D34 replaced the read-only entity with a writable switch, and the old config a
+    pre-D34 build left on the broker must not survive beside it. A non-retained
+    blank removes only the live Home Assistant entity; the retained form is what
+    also clears the broker's stored copy, so every blank takes the retained flag
+    at the discovery QoS.
+
+    :param harness: the stack under test.
+    """
+    await _connect(harness)
+    await wait_until(lambda: _published(harness, STATE_TOPIC) != [])
+
+    blanked = _published(harness, READ_ONLY_CONFIG_TOPIC)
+    assert blanked, f"nothing was published to {READ_ONLY_CONFIG_TOPIC}"
+    assert all(
+        entry == (READ_ONLY_CONFIG_TOPIC, "", DISCOVERY_PUBLISH_QOS, True) for entry in blanked
+    )
+
+
+async def test_the_read_only_blank_precedes_the_switch_config(harness: Harness) -> None:
+    """The dead read-only entity is blanked BEFORE its switch is announced.
+
+    Home Assistant must never be able to register a read-only entity under the
+    slug after the writable one has appeared: an upgrade that published in the
+    other order could leave the dead entity beside the switch until a restart.
+
+    :param harness: the stack under test.
+    """
+    await _connect(harness)
+    await wait_until(lambda: _published(harness, CONFIG_TOPIC) != [])
+
+    published = harness.client.published
+    read_only_index = published.index((READ_ONLY_CONFIG_TOPIC, "", DISCOVERY_PUBLISH_QOS, True))
+    config_index = next(index for index, entry in enumerate(published) if entry[0] == CONFIG_TOPIC)
+    assert read_only_index < config_index
+
+
+async def test_retract_all_blanks_the_read_only_config_too(harness: Harness) -> None:
+    """The settings handoff leaves no read-only ghost behind either.
+
+    ``retract_all`` runs before the old bridge stops, so its blanks are the last
+    chance to remove every identifier of a settings generation. A switch config
+    blank alone would leave a pre-D34 ``binary_sensor`` registered forever, so the
+    read-only config is blanked here with the same retained empty payload.
+
+    :param harness: the stack under test.
+    """
+    await _connect(harness)
+    await wait_until(lambda: _published(harness, STATE_TOPIC) != [])
+
+    await harness.discovery.retract_all()
+
+    assert _published(harness, READ_ONLY_CONFIG_TOPIC)[-1] == (
+        READ_ONLY_CONFIG_TOPIC,
+        "",
+        DISCOVERY_PUBLISH_QOS,
         True,
     )
 
@@ -731,6 +830,12 @@ async def test_deleting_a_tile_publishes_an_empty_payload(harness: Harness) -> N
     await harness.store.delete_entity(tile.id)
 
     assert _published(harness, CONFIG_TOPIC)[-1] == (CONFIG_TOPIC, "", DISCOVERY_PUBLISH_QOS, False)
+    assert _published(harness, READ_ONLY_CONFIG_TOPIC)[-1] == (
+        READ_ONLY_CONFIG_TOPIC,
+        "",
+        DISCOVERY_PUBLISH_QOS,
+        True,
+    )
     assert _published(harness, STATE_TOPIC)[-1] == (STATE_TOPIC, "", SELECTION_STATE_QOS, True)
     assert harness.broker.retained[STATE_TOPIC] == b""
     # Only the deleted slug is retracted: the other tile keeps its entity and state.
@@ -757,9 +862,11 @@ async def test_the_purge_lands_on_the_topics_the_display_name_derives(
     config_topic = selection_discovery_topic(_settings(), slug)
     state_topic = selection_state_topic(_settings(), slug)
 
+    read_only_config_topic = selection_read_only_discovery_topic(_settings(), slug)
     assert tile.display_name == "Front Door"
     assert slug == "front_door"
-    assert config_topic == f"homeassistant/binary_sensor/chime_deck_default_{slug}/config"
+    assert config_topic == f"homeassistant/switch/chime_deck_default_{slug}/config"
+    assert read_only_config_topic == f"homeassistant/binary_sensor/chime_deck_default_{slug}/config"
     assert state_topic == f"chime_deck/default/selection/{slug}"
 
     await _connect(harness)
@@ -771,16 +878,23 @@ async def test_the_purge_lands_on_the_topics_the_display_name_derives(
     await harness.store.delete_entity(tile.id)
 
     assert _published(harness, config_topic)[-1] == (config_topic, "", DISCOVERY_PUBLISH_QOS, False)
+    assert _published(harness, read_only_config_topic)[-1] == (
+        read_only_config_topic,
+        "",
+        DISCOVERY_PUBLISH_QOS,
+        True,
+    )
     assert _published(harness, state_topic)[-1] == (state_topic, "", SELECTION_STATE_QOS, True)
     assert harness.broker.retained[state_topic] == b""
 
 
-async def test_retract_all_removes_every_selection_sensor(harness: Harness) -> None:
-    """The settings handoff retracts both sensors, and a second call is a no-op.
+async def test_retract_all_removes_every_selection_switch(harness: Harness) -> None:
+    """The settings handoff retracts both switches and their read-only ghosts.
 
     ``retract_all`` is the ``_teardown_mqtt(retract=True)`` path: it must purge the
-    selection sensors as well as the buttons, and the cleared bookkeeping must keep
-    a repeated call from publishing anything.
+    selection switches as well as the buttons, blanking the PRE-D34 read-only
+    config a stale Home Assistant might still hold, and the cleared bookkeeping
+    must keep a repeated call from publishing anything.
 
     :param harness: the stack under test.
     """
@@ -793,15 +907,21 @@ async def test_retract_all_removes_every_selection_sensor(harness: Harness) -> N
 
     await harness.discovery.retract_all()
 
-    for config_topic, state_topic in (
-        (CONFIG_TOPIC, STATE_TOPIC),
-        (DRYER_CONFIG_TOPIC, DRYER_STATE_TOPIC),
+    for config_topic, read_only_topic, state_topic in (
+        (CONFIG_TOPIC, READ_ONLY_CONFIG_TOPIC, STATE_TOPIC),
+        (DRYER_CONFIG_TOPIC, READ_ONLY_DRYER_CONFIG_TOPIC, DRYER_STATE_TOPIC),
     ):
         assert _published(harness, config_topic)[-1] == (
             config_topic,
             "",
             DISCOVERY_PUBLISH_QOS,
             False,
+        )
+        assert _published(harness, read_only_topic)[-1] == (
+            read_only_topic,
+            "",
+            DISCOVERY_PUBLISH_QOS,
+            True,
         )
         assert _published(harness, state_topic)[-1] == (
             state_topic,
@@ -841,6 +961,18 @@ async def test_editing_a_tile_republishes_its_config(harness: Harness) -> None:
         DISCOVERY_PUBLISH_QOS,
         False,
     )
+    assert _published(harness, READ_ONLY_RENAMED_CONFIG_TOPIC)[-1] == (
+        READ_ONLY_RENAMED_CONFIG_TOPIC,
+        "",
+        DISCOVERY_PUBLISH_QOS,
+        True,
+    )
+    assert _published(harness, READ_ONLY_CONFIG_TOPIC)[-1] == (
+        READ_ONLY_CONFIG_TOPIC,
+        "",
+        DISCOVERY_PUBLISH_QOS,
+        True,
+    )
     assert _published(harness, STATE_TOPIC)[-1] == (STATE_TOPIC, "", SELECTION_STATE_QOS, True)
     assert harness.broker.retained[STATE_TOPIC] == b""
     # The resync is a full listing, so the untouched tile is re-announced too;
@@ -848,7 +980,7 @@ async def test_editing_a_tile_republishes_its_config(harness: Harness) -> None:
     assert len(_published(harness, DRYER_CONFIG_TOPIC)) == dryer_config_before + 1
 
     await harness.store.upsert_entity(EntityIn(entity_id="light.kitchen"))
-    kitchen_topic = "homeassistant/binary_sensor/chime_deck_default_light_kitchen/config"
+    kitchen_topic = "homeassistant/switch/chime_deck_default_light_kitchen/config"
     kitchen_state = "chime_deck/default/selection/light_kitchen"
     assert _parsed(harness, kitchen_topic)["name"] == "light.kitchen selected"
     assert _published(harness, kitchen_state)[-1] == (
@@ -885,12 +1017,12 @@ async def test_a_tile_named_dryer_is_announced_under_its_display_name(tmp_path: 
 
         dryer = _parsed(harness, NAMED_DRYER_CONFIG_TOPIC)
         assert dryer["name"] == "Dryer selected"
-        assert dryer["default_entity_id"] == "binary_sensor.chime_deck_dryer"
+        assert dryer["default_entity_id"] == "switch.chime_deck_dryer"
         assert dryer["state_topic"] == "chime_deck/default/selection/dryer"
 
         washer = _parsed(harness, WASHER_CONFIG_TOPIC)
         assert washer["name"] == "Washing Machine selected"
-        assert washer["default_entity_id"] == "binary_sensor.chime_deck_washing_machine"
+        assert washer["default_entity_id"] == "switch.chime_deck_washing_machine"
         assert washer["state_topic"] == "chime_deck/default/selection/washing_machine"
 
 
@@ -924,6 +1056,12 @@ async def test_a_redeploy_purges_the_pre_upgrade_topics(tmp_path: Path) -> None:
             DISCOVERY_PUBLISH_QOS,
             False,
         )
+        assert _published(harness, READ_ONLY_LEGACY_CONFIG_TOPIC)[-1] == (
+            READ_ONLY_LEGACY_CONFIG_TOPIC,
+            "",
+            DISCOVERY_PUBLISH_QOS,
+            True,
+        )
         assert _published(harness, LEGACY_STATE_TOPIC)[-1] == (
             LEGACY_STATE_TOPIC,
             "",
@@ -933,7 +1071,7 @@ async def test_a_redeploy_purges_the_pre_upgrade_topics(tmp_path: Path) -> None:
         assert broker.retained[LEGACY_STATE_TOPIC] == b""
         # The tile itself is announced under the new name in the same pass.
         assert _parsed(harness, CONFIG_TOPIC)["default_entity_id"] == (
-            "binary_sensor.chime_deck_front_door"
+            "switch.chime_deck_front_door"
         )
 
 
@@ -962,8 +1100,8 @@ async def test_colliding_display_names_get_distinct_deterministic_slugs(tmp_path
 
         first = _parsed(harness, NAMED_DRYER_CONFIG_TOPIC)
         second = _parsed(harness, SECOND_DRYER_CONFIG_TOPIC)
-        assert first["default_entity_id"] == "binary_sensor.chime_deck_dryer"
-        assert second["default_entity_id"] == "binary_sensor.chime_deck_dryer_2"
+        assert first["default_entity_id"] == "switch.chime_deck_dryer"
+        assert second["default_entity_id"] == "switch.chime_deck_dryer_2"
         assert first["unique_id"] != second["unique_id"]
         assert first["state_topic"] == "chime_deck/default/selection/dryer"
         assert second["state_topic"] == "chime_deck/default/selection/dryer_2"

@@ -471,14 +471,22 @@ class FakeBroker:
         code = ReasonCode(PacketTypes.DISCONNECT, name)
         client.on_disconnect(client, None, DisconnectFlags(False), code, None)
 
-    def deliver(self, topic: str, payload: bytes | bytearray) -> None:
+    def deliver(self, topic: str, payload: bytes | bytearray, *, retain: bool = False) -> None:
         """Route one message through every matching subscription.
 
         A ``bytearray`` payload is passed through untouched so a test can prove
         the bridge normalises it; only the ``undelivered`` record is normalised.
 
+        *retain* is the broker's RETAIN flag for **this delivery**, not a request
+        to store the payload: a broker replays a retained message with the flag
+        set, and a consumer has to be able to tell that replay from a live
+        publish (an old selection command replayed after a reconnect must not
+        re-arm a tile). ``False`` is the default so every existing call site
+        stays a live delivery.
+
         :param topic: topic the message was published to.
         :param payload: payload bytes.
+        :param retain: whether the broker is replaying a stored message.
         """
         delivered = False
         for client in self.clients:
@@ -487,18 +495,28 @@ class FakeBroker:
             if not any(self._topic_matches(pattern, topic) for pattern in client.subscriptions):
                 continue
             delivered = True
-            client.on_message(client, None, FakeMessage(topic, cast("bytes", payload)))
+            client.on_message(
+                client, None, FakeMessage(topic, cast("bytes", payload), retain=retain)
+            )
         if not delivered:
             self.undelivered.append((topic, bytes(payload)))
 
-    def publish_from_test(self, topic: str, payload: bytes | bytearray) -> None:
+    def publish_from_test(
+        self, topic: str, payload: bytes | bytearray, *, retain: bool = False
+    ) -> None:
         """Publish as another client on the broker: retained store plus routing.
+
+        The retained store is always updated (the fake's long-standing behaviour
+        and how the seed helpers work); *retain* only controls the RETAIN flag
+        the routers see, which is what a broker sets when it replays a stored
+        message. Pass ``retain=True`` to simulate such a replay.
 
         :param topic: topic to publish to.
         :param payload: payload bytes.
+        :param retain: whether the delivery carries the broker's RETAIN flag.
         """
         self.retained[topic] = bytes(payload)
-        self.deliver(topic, payload)
+        self.deliver(topic, payload, retain=retain)
 
     @staticmethod
     def _topic_matches(pattern: str, topic: str) -> bool:

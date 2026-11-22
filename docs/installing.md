@@ -375,7 +375,8 @@ act.
   — removing the discovery configs and blanking their retained state and availability topics —
   so they clear themselves. No broker surgery and no Home Assistant restart are needed.
 - **Selection entity ids change** from `binary_sensor.ha_super_doorbell_<slug>` to
-  `binary_sensor.chime_deck_<slug>`. Automations that reference the old ids must be updated.
+  `switch.chime_deck_<slug>`. Automations that reference the old ids must be updated.
+  See [home-assistant.md](home-assistant.md) for the switch contract and the migration.
 - **A configuration export made before the rename still imports.** Documents carrying the old
   `"format": "ha-super-doorbell/config"` tag are accepted by **Settings → About → Import**
   exactly as before, so there is nothing to re-export.

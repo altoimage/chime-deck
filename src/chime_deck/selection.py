@@ -15,14 +15,23 @@ The set is keyed on the Home Assistant ``entity_id`` string
 (``lock.front_door``), never on a row id and never on a list position, so
 reordering the tiles is a no-op for the selection.
 
-:meth:`SelectionService.set_on_change` is the seam the future MQTT publisher
-(HSD-fro0) subscribes to: it receives ``(entity_id, selected)`` after every
-successful toggle, so the broker announcement and the websocket frame come from
-one place. The hub reads this state through :class:`SelectionLookup` only, so a
-hub can be built with no selection service at all (:data:`NO_SELECTION`) — the
-shape a unit test and a build with no selection wants.
+:meth:`SelectionService.set_on_change` is the seam the MQTT publisher
+subscribes to: it receives ``(entity_id, selected)`` after every successful
+change, so the broker announcement and the websocket frame come from one place
+and can never disagree.
 
-Owning ticket: HSD-u6k5.
+**Two writers, one state (D34).** A panel tap flips a tile through
+:meth:`SelectionService.toggle`; an inbound Home Assistant command sets an
+explicit value through :meth:`SelectionService.set`. Both write the same set and
+both leave through the one ``on_change`` callback, so there is no second path to
+the broker or to the hub.
+
+The hub reads this state through :class:`SelectionLookup` only, so a hub can be
+built with no selection service at all (:data:`NO_SELECTION`) — the shape a unit
+test and a build with no selection wants. A consumer that also *writes* asks for
+:class:`SelectionWriter` instead, which is the same seam plus the setter.
+
+Owning ticket: HSD-u6k5; the write seam was added by D34 (HSD-8a5f).
 """
 
 from __future__ import annotations
@@ -31,7 +40,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, Protocol, runtime_checkable
 
-__all__ = ["NO_SELECTION", "NoSelection", "SelectionLookup", "SelectionService"]
+__all__ = [
+    "NO_SELECTION",
+    "NoSelection",
+    "SelectionLookup",
+    "SelectionService",
+    "SelectionWriter",
+]
 
 
 @runtime_checkable
@@ -51,6 +66,33 @@ class SelectionLookup(Protocol):
         ...
 
 
+@runtime_checkable
+class SelectionWriter(SelectionLookup, Protocol):
+    """The write seam D34 needs: a command sets a VALUE, it does not flip one.
+
+    An inbound Home Assistant command names the value it wants (``turn_on``,
+    ``turn_off``), never "the other one", so the single write method takes the
+    value: a command delivered twice must be a no-op rather than a toggle back,
+    and a command that repeats the current value must produce no change at all.
+    That is why this is :meth:`SelectionService.set` and not ``toggle``.
+
+    The protocol extends the read seam because a caller that may write almost
+    always reads first ("is this already the value?"), and one seam with both
+    halves is what lets every consumer accept the real service,
+    :data:`NO_SELECTION`, or a test fake without an ``isinstance`` guard of its
+    own.
+    """
+
+    def set(self, entity_id: str, selected: bool) -> bool:
+        """Force *entity_id* to *selected* and return the value in effect.
+
+        :param entity_id: Home Assistant entity id, e.g. ``lock.front_door``.
+        :param selected: the value to force, not a value to flip to its opposite.
+        :returns: the value now in effect for *entity_id*.
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class NoSelection:
     """Default lookup: nothing is ever selected, and nothing can become selected."""
@@ -62,26 +104,43 @@ class NoSelection:
         """
         return False
 
+    def set(self, entity_id: str, selected: bool) -> bool:
+        """Return ``False``: a build with no selection service cannot be commanded.
+
+        There is nowhere to store the value and no callback to tell, so the write
+        is refused rather than silently accepted. A caller can tell the refusal
+        from an accepted write by reading the return value, which is how the MQTT
+        command handler decides to republish the (unchanged) state.
+
+        :param entity_id: Home Assistant entity id; ignored.
+        :param selected: the requested value; ignored.
+        """
+        return False
+
 
 NO_SELECTION: Final = NoSelection()
 """The default seam: a hub built without a selection service selects nothing."""
 
 
 class SelectionService:
-    """Own the volatile selection set and tell one callback about every toggle.
+    """Own the volatile selection set and tell one callback about every change.
 
     The service is the only writer of the set, so the response, the websocket
-    frame and the future MQTT announcement can never disagree. An optional
+    frame and the MQTT announcement can never disagree. An optional
     ``on_change`` callback lets the hub react without this module knowing that a
     websocket exists, exactly like
     :class:`~chime_deck.health.HealthRegistry`.
+
+    It is also the single place a change is *notified* from: :meth:`toggle` and
+    :meth:`set` differ only in how they compute the value, never in what they do
+    with it.
     """
 
     def __init__(self, *, on_change: Callable[[str, bool], None] | None = None) -> None:
         """Create an empty selection: every tile starts unselected.
 
         :param on_change: called with ``(entity_id, selected)`` after every
-            successful :meth:`toggle`.
+            successful :meth:`toggle` or :meth:`set`.
         """
         self._selected: set[str] = set()
         self._on_change = on_change
@@ -90,7 +149,7 @@ class SelectionService:
         """Install the change callback after construction.
 
         :param on_change: called with ``(entity_id, selected)`` after every
-            successful :meth:`toggle`; ``None`` silences it.
+            successful :meth:`toggle` or :meth:`set`; ``None`` silences it.
         """
         self._on_change = on_change
 
@@ -104,11 +163,36 @@ class SelectionService:
     def toggle(self, entity_id: str) -> bool:
         """Flip the selection of *entity_id*, notify, and return the new value.
 
+        The panel's write: a tap always flips, and a tap always notifies, so this
+        is :meth:`set` of the flipped value.
+
         :param entity_id: Home Assistant entity id, e.g. ``lock.front_door``.
         :returns: ``True`` when the entity is selected now, ``False`` when this
             call deselected it.
         """
-        selected = entity_id not in self._selected
+        return self.set(entity_id, entity_id not in self._selected)
+
+    def set(self, entity_id: str, selected: bool) -> bool:
+        """Force the selection of *entity_id*, notify once, and return the value.
+
+        The write D34 needs for an inbound Home Assistant command. A command
+        carries the value it wants, so this is a set and not a :meth:`toggle`:
+        two deliveries of the same ``on`` must leave the tile on, and a command
+        that repeats the current value must change nothing.
+
+        A value already in effect therefore does **not** call ``on_change``. The
+        callback is the one point that produces the hub frame and the broker
+        publish, so an idempotent confirm has to produce neither — otherwise a
+        repeat command would cost a websocket frame and a second retained state
+        publish for a value that did not move.
+
+        :param entity_id: Home Assistant entity id, e.g. ``lock.front_door``.
+        :param selected: the value to force.
+        :returns: the value now in effect, which is *selected* whenever this
+            service accepted the write.
+        """
+        if self.is_selected(entity_id) == selected:
+            return selected
         if selected:
             self._selected.add(entity_id)
         else:

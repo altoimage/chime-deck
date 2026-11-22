@@ -1,8 +1,11 @@
 {
   "name": "Dryer selected",
   "unique_id": "chime_deck_default_dryer_selected",
-  "default_entity_id": "binary_sensor.chime_deck_dryer",
+  "default_entity_id": "switch.chime_deck_dryer",
   "state_topic": "chime_deck/default/selection/dryer",
+  "command_topic": "chime_deck/default/selection/dryer/set",
+  "state_on": "on",
+  "state_off": "off",
   "payload_on": "on",
   "payload_off": "off",
   "icon": "mdi:gesture-tap-button",

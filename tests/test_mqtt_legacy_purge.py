@@ -97,6 +97,30 @@ LEGACY_DRYER_ENTITY_ID_CONFIG_TOPIC: Final = (
 )
 """Pre-rename discovery topic of "Dryer" under its PRE-HSD-jw0x entity-id slug."""
 
+LEGACY_LOCK_SWITCH_CONFIG_TOPIC: Final = (
+    "homeassistant/switch/super_doorbell_default_front_door/config"
+)
+"""Pre-rename ``switch`` config of "Front Door" under its display-name slug.
+
+A pre-D34 build never published this family, but the purge plans it anyway: the
+shared translation cannot know which entity type the old build announced, so the
+``switch`` half is the harmless no-op that makes the purge future-proof for a
+later rename.
+"""
+
+LEGACY_DRYER_SWITCH_CONFIG_TOPIC: Final = "homeassistant/switch/super_doorbell_default_dryer/config"
+"""Pre-rename ``switch`` config of "Dryer" under its display-name slug."""
+
+LEGACY_LOCK_ENTITY_ID_SWITCH_CONFIG_TOPIC: Final = (
+    "homeassistant/switch/super_doorbell_default_lock_front_door/config"
+)
+"""Pre-rename ``switch`` config of "Front Door" under its entity-id slug."""
+
+LEGACY_DRYER_ENTITY_ID_SWITCH_CONFIG_TOPIC: Final = (
+    "homeassistant/switch/super_doorbell_default_sensor_dryer_nodered_d90a5b74cba48067/config"
+)
+"""Pre-rename ``switch`` config of "Dryer" under its entity-id slug."""
+
 LEGACY_LOCK_STATE_TOPIC: Final = "super_doorbell/default/selection/front_door"
 """Retained pre-rename state topic of "Front Door" under its display-name slug."""
 
@@ -138,17 +162,23 @@ LEGACY_BLANKED_TOPICS: Final[frozenset[str]] = frozenset(
     (
         *SEEDED_CONFIG_TOPICS,
         LEGACY_DRYER_ENTITY_ID_CONFIG_TOPIC,
+        LEGACY_LOCK_SWITCH_CONFIG_TOPIC,
+        LEGACY_DRYER_SWITCH_CONFIG_TOPIC,
+        LEGACY_LOCK_ENTITY_ID_SWITCH_CONFIG_TOPIC,
+        LEGACY_DRYER_ENTITY_ID_SWITCH_CONFIG_TOPIC,
         *SEEDED_STATE_TOPICS,
         LEGACY_DRYER_ENTITY_ID_STATE_TOPIC,
     )
 )
-"""Every topic one purge blanks: the seeded ghosts plus the two harmless no-ops.
+"""Every topic one purge blanks: the seeded ghosts plus the harmless no-ops.
 
-The two extras are the pre-HSD-jw0x entity-id slugs of the tile with the
+The extras are the pre-HSD-jw0x entity-id slugs of the tile with the
 integration-specific entity id, which the pre-rename build published under
-``..._sensor_dryer_nodered_d90a5b74cba48067``. They are not seeded because the
-purge cannot know whether the old build published them; blanking them anyway is
-the harmless-no-op half of the design.
+``..._sensor_dryer_nodered_d90a5b74cba48067``, and the pre-rename ``switch``
+config family. They are not seeded because the purge cannot know whether the old
+build published them; blanking them anyway is the harmless-no-op half of the
+design. The ``switch`` family is a no-op for a pre-D34 build (which published a
+``binary_sensor``) but is what a later rename will have to retract.
 """
 
 
@@ -387,8 +417,8 @@ async def test_a_fresh_process_blanks_every_pre_rename_topic(
     ]
     assert any(
         "instance default" in message
-        and "11 blanked" in message
-        and "6 discovery configs" in message
+        and "15 blanked" in message
+        and "10 discovery configs" in message
         and "5 retained states" in message
         for message in infos
     ), infos

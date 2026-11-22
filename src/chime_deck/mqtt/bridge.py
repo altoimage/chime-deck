@@ -515,8 +515,16 @@ MessageHandler = Callable[["object", "object", "MqttMessage"], None]
 BirthCallback = Callable[[], Awaitable[None]]
 """Called whenever the discovery payloads should be republished (HSD-c3si fills this)."""
 
-MessageCallback = Callable[[str, bytes], Awaitable[None]]
-"""Called with every message on a topic this bridge subscribed to (HSD-dtpo fills this)."""
+MessageCallback = Callable[[str, bytes, bool], Awaitable[None]]
+"""Called with every message on a topic this bridge subscribed to (HSD-dtpo fills this).
+
+The third argument is the broker's **RETAIN flag for that delivery**, not the
+publisher's intent: ``True`` means the broker is replaying a message it stored,
+which a consumer needs to know because a replayed command is a replay of an *old*
+intent (the tile was asked to turn on maybe days ago), not a live request. The
+subscription cannot see that distinction any other way — the flag lives on the
+message, and :class:`chime_deck.mqtt.bridge.MqttMessage` already carries it.
+"""
 
 
 class ClientFactory(Protocol):
@@ -1064,8 +1072,9 @@ class MqttBridge:
         cannot come back to life after the shutdown has published the retained
         ``offline``.
 
-        :param on_message: callback receiving every message on a subscribed,
-            non-status topic, or ``None`` to remove it.
+        :param on_message: callback receiving the topic, the normalised payload and
+            the broker's RETAIN flag for every message on a subscribed, non-status
+            topic, or ``None`` to remove it.
         """
         if self._is_stopping():
             _LOGGER.debug("ignoring set_on_message: the MQTT bridge is stopping")
@@ -1252,11 +1261,16 @@ class MqttBridge:
     def _on_message(self, _client: object, _userdata: object, message: MqttMessage) -> None:
         """Accept paho's message callback and hop to the event loop.
 
+        The RETAIN flag rides along with the topic and the payload: it describes
+        *this delivery* (a broker replay) and is gone once the message object is,
+        so the handler that has to refuse a replayed command cannot recover it
+        later.
+
         :param _client: paho's client instance, unused.
         :param _userdata: paho's userdata, unused.
         :param message: the incoming message.
         """
-        self._submit(self._handle_message(message.topic, message.payload))
+        self._submit(self._handle_message(message.topic, message.payload, message.retain))
 
     async def _handle_connect(self, reason_code: ReasonCode) -> None:
         """Publish availability, replay the subscriptions and ask for a republish.
@@ -1360,7 +1374,7 @@ class MqttBridge:
         )
         _LOGGER.warning("lost the connection to the MQTT broker")
 
-    async def _handle_message(self, topic: str, payload: object) -> None:
+    async def _handle_message(self, topic: str, payload: object, retain: bool) -> None:
         """Route one incoming message. Never raises.
 
         On a Home Assistant birth message the discovery payloads go out first and
@@ -1370,6 +1384,8 @@ class MqttBridge:
 
         :param topic: topic the message arrived on.
         :param payload: raw payload, normalised here.
+        :param retain: the broker's RETAIN flag for this delivery, passed on to the
+            message seam untouched.
         """
         if self._stopping:
             # A birth message racing with stop() would republish availability after
@@ -1402,7 +1418,7 @@ class MqttBridge:
         if self._message_callback is None:
             _LOGGER.debug("ignoring an MQTT message on %s: no handler is installed", topic)
             return
-        await self._invoke_message(topic, data)
+        await self._invoke_message(topic, data, retain)
 
     def _is_stopping(self) -> bool:
         """Return whether :meth:`stop` has already begun.
@@ -1452,17 +1468,18 @@ class MqttBridge:
         except Exception:
             _LOGGER.warning("the MQTT republish callback failed (%s)", reason, exc_info=True)
 
-    async def _invoke_message(self, topic: str, payload: bytes) -> None:
+    async def _invoke_message(self, topic: str, payload: bytes, retain: bool) -> None:
         """Run the message seam, bounded and never fatal.
 
         :param topic: topic the message arrived on.
         :param payload: normalised payload.
+        :param retain: the broker's RETAIN flag for this delivery.
         """
         on_message = self._message_callback
         if on_message is None:
             return
         try:
-            await asyncio.wait_for(on_message(topic, payload), timeout=self._seam_timeout_s)
+            await asyncio.wait_for(on_message(topic, payload, retain), timeout=self._seam_timeout_s)
         except TimeoutError:
             _LOGGER.warning(
                 "the MQTT message callback did not finish within %g s for %s",

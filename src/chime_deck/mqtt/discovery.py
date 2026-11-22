@@ -39,15 +39,32 @@ the stale entity *requires* a Home Assistant restart — a long-lived HA session
 keeps showing the ghost until it restarts. That is a consequence of §4, not a
 bug here.
 
-**The selection sensors (design 02 §9, D29).** One read-only ``binary_sensor``
-per displayed entity: no ``command_topic`` (nothing presses it), a non-retained
-discovery config and a **retained** state on
-``chime_deck/{instance}/selection/{slug}`` where ``on`` means the tile is
-selected right now. They share the button's ``device`` block, so the two entity
+**The selection switches (design 02 §9, D29 as amended by D34).** One writable
+``switch`` per displayed entity: a non-retained discovery config, a **retained**
+state on ``chime_deck/{instance}/selection/{slug}`` where ``on`` means the tile
+is selected right now, and a ``command_topic`` on
+``chime_deck/{instance}/selection/{slug}/set`` that Home Assistant publishes
+``on``/``off`` to. They share the button's ``device`` block, so the two entity
 types can never disagree about the device page.
 
+**Both sides write, through one implementation (D34).** A panel tap flips the
+value through :meth:`~chime_deck.selection.SelectionService.toggle` and an
+inbound command sets it through
+:meth:`~chime_deck.selection.SelectionService.set`; there is no second path.
+The state topic stays authoritative and is republished (retained) after every
+change, so any disagreement resolves to the last writer and Home Assistant's
+optimistic switch is corrected within one round trip. **Refusals are corrected,
+never swallowed**: a *retained* command (a replay of an old intent, not a live
+one), a command for a tile that is not displayed, and a malformed payload are
+all answered with a republish of the current state, so the switch snaps back
+instead of lying. **The pre-D34 read-only ``binary_sensor`` configs are purged**
+with retained empty payloads *before* the switch config is published, so no dead
+read-only entity is left beside the switch. **Volatility stands** (D29 §4): every
+restart starts with nothing selected and every selection is republished on every
+connect, so after a restart the value is ``off`` for everything.
+
 **The selection slug comes from the tile's display name, not its entity id
-(HSD-jw0x).** §9 writes ``binary_sensor.chime_deck_<slug>``, and the slug
+(HSD-jw0x).** §9 writes ``switch.chime_deck_<slug>``, and the slug
 is now the name: :func:`chime_deck.store.derive_slug` derives the one dash
 slug of this project (HSD-po1g) and :func:`selection_slug` maps that into Home
 Assistant's *object id* grammar, which forbids a dash (Home Assistant silently
@@ -55,7 +72,7 @@ slugifies an invalid ``default_entity_id``, so the payload, the state topic and
 the unique id would otherwise disagree with the entity id an automation has to
 reference). "Dryer" is therefore ``dryer`` and "Washing Machine"
 ``washing_machine``, and the entity id an automation sees is
-``binary_sensor.chime_deck_dryer``. Names that slug to the same base are
+``switch.chime_deck_dryer``. Names that slug to the same base are
 disambiguated deterministically by :func:`assign_selection_slugs` — lowest
 ``entity_id`` keeps the bare slug, the others take ``_2``, ``_3``, … — and a tile
 with no usable display name falls back to its entity id.
@@ -63,17 +80,28 @@ with no usable display name falls back to its entity id.
 That pre-HSD-jw0x entity-id slug (:func:`selection_entity_id_slug`) is retained
 for exactly two jobs: that fallback, and computing the stale topic an upgrade
 must purge. It is what is already on the owner's broker, so an upgrade renames
-every existing selection entity: the old discovery and retained state topics are
-purged and the new ones published. Retained state is why
-:meth:`MqttDiscovery.on_birth` republishes every selection value on every
+every existing selection entity (a pre-D34 build also changes its entity *type*,
+from a read-only ``binary_sensor`` to a writable ``switch``): the old discovery
+and retained state topics are purged and the new ones published. Retained state
+is why :meth:`MqttDiscovery.on_birth` republishes every selection value on every
 CONNACK: one stale retained ``on`` would outlive the truth forever.
 
 **Loop safety.** Every coroutine in this module is only ever invoked from the
 bridge's seams (``on_birth`` and ``on_message``), and the bridge already hops off
 paho's network thread before calling them, so nothing here may be called from a
-paho callback directly. The one synchronous member,
-:meth:`MqttDiscovery.on_selection_changed`, is called from the event loop too (the
-toggle route), never from a paho callback.
+paho callback directly. The synchronous members —
+:meth:`MqttDiscovery.on_selection_changed`, which the toggle route calls, and
+:meth:`MqttDiscovery._handle_selection_command` with the two helpers it uses,
+which :meth:`MqttDiscovery.on_message` calls — are therefore always on the event
+loop too, never on a paho callback, which is exactly what the bridge's publish
+contract requires.
+
+**A selection command is a write, not a press.** The two halves share
+:meth:`MqttDiscovery.on_message` and nothing else: a press is asynchronous and
+reaches the shared press service, while a command is a synchronous write to
+:class:`~chime_deck.selection.SelectionService` whose only output is the one
+``on_change`` the service already had. Selection never presses a button (D29 §1,
+D34 §4) — the policy that acts on a selected tile lives in Home Assistant.
 
 **The pre-rename purge (HSD-l84l).** The project was renamed from *Super
 Doorbell* to *ChimeDeck*, which renamed every identifier this module publishes.
@@ -99,10 +127,12 @@ Every identifier this module publishes is built from ``settings.instance_id``:
 | availability topic ``chime_deck/{instance}/availability`` | instance | stable | changes |
 | press topic ``chime_deck/{instance}/button/{slug}/set`` | instance | stable | changes |
 | selection state topic ``chime_deck/{instance}/selection/{slug}`` | instance | stable | changes |
+| selection command topic ``.../selection/{slug}/set`` | instance | stable | changes |
+| selection command filter ``.../selection/+/set`` | instance | stable | changes |
 | MQTT client id ``chime-deck-{instance}`` | instance | stable | changes |
 | ``device`` block ``name`` (HA device page) | ``device.name`` | changes | stable |
 | browser title | ``device.name`` | changes | stable |
-| ``default_entity_id`` ``binary_sensor.chime_deck_{slug}`` | slug only | stable | stable |
+| ``default_entity_id`` ``switch.chime_deck_{slug}`` | slug only | stable | stable |
 | manufacturer / model / sw_version / configuration_url | constants | stable | stable |
 
 So ``mqtt.instance_id`` is the identity root and ``device.name`` only renames the
@@ -125,10 +155,11 @@ must NEVER gate a :meth:`MqttDiscovery.retract_all`/republish — ``bridge.publi
 only buffers while disconnected, so a cache-skipped republish could never reach
 the wire.
 
-Owning ticket: HSD-c3si; the selection sensors were added by HSD-fro0, the
-slugs they are named by moved to the tile display name in HSD-jw0x, the
-pre-rename purge was added by HSD-l84l, and the device name became a setting
-with the instance id as the identity root in HSD-vwdy.
+Owning ticket: HSD-c3si; the selection switches were added by HSD-fro0, made
+writable by D34 (HSD-8a5f), the slugs they are named by moved to the tile
+display name in HSD-jw0x, the pre-rename purge was added by HSD-l84l, and the
+device name became a setting with the instance id as the identity root in
+HSD-vwdy.
 """
 
 from __future__ import annotations
@@ -144,7 +175,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 from .. import __version__
 from ..config import is_loopback
-from ..selection import NO_SELECTION, SelectionLookup
+from ..selection import NO_SELECTION, SelectionWriter
 from .bridge import AVAILABILITY_OFFLINE, AVAILABILITY_ONLINE, DEFAULT_DEVICE_NAME
 from .errors import MqttConfigurationError
 from .legacy import legacy_topic
@@ -173,12 +204,17 @@ __all__ = [
     "PRESS_PAYLOAD",
     "PRESS_QOS",
     "PRESS_TOPIC_TEMPLATE",
+    "SELECTION_COMMAND_FILTER_TEMPLATE",
+    "SELECTION_COMMAND_QOS",
+    "SELECTION_COMMAND_TOPIC_PREFIX_TEMPLATE",
+    "SELECTION_COMMAND_TOPIC_TEMPLATE",
     "SELECTION_DEFAULT_ENTITY_ID_TEMPLATE",
     "SELECTION_DISCOVERY_TOPIC_TEMPLATE",
     "SELECTION_ICON",
     "SELECTION_KEY_ORDER",
     "SELECTION_PAYLOAD_OFF",
     "SELECTION_PAYLOAD_ON",
+    "SELECTION_READ_ONLY_DISCOVERY_TOPIC_TEMPLATE",
     "SELECTION_STATE_QOS",
     "SELECTION_STATE_TOPIC_TEMPLATE",
     "SELECTION_UNIQUE_ID_TEMPLATE",
@@ -201,9 +237,12 @@ __all__ = [
     "encode_payload",
     "is_mqtt_safe_icon",
     "is_mqtt_safe_slug",
+    "selection_command_filter",
+    "selection_command_topic",
     "selection_default_entity_id",
     "selection_discovery_topic",
     "selection_entity_id_slug",
+    "selection_read_only_discovery_topic",
     "selection_slug",
     "selection_state_topic",
     "selection_unique_id",
@@ -311,7 +350,7 @@ SELECTION_PAYLOAD_OFF: Final = "off"
 """State payload of an unselected tile; also the state of every tile after a restart."""
 
 SELECTION_ICON: Final = "mdi:gesture-tap-button"
-"""Icon of the selection sensor: a tap, because a tile is selected by tapping it."""
+"""Icon of the selection switch: a tap, because a tile is selected by tapping it."""
 
 SELECTION_STATE_QOS: Final = 1
 """QoS of the *retained* selection state, which deserves at-least-once.
@@ -321,24 +360,61 @@ carries no ``qos`` key, because design 02 §9's example has none.
 """
 
 SELECTION_STATE_TOPIC_TEMPLATE: Final = "chime_deck/{instance}/selection/{slug}"
-"""Retained state topic of one tile's selection sensor."""
+"""Retained state topic of one tile's selection switch."""
 
 SELECTION_UNIQUE_ID_TEMPLATE: Final = "chime_deck_{instance}_{slug}_selected"
-"""Stable Home Assistant unique id of one tile's selection sensor."""
+"""Stable Home Assistant unique id of one tile's selection switch."""
 
-SELECTION_DISCOVERY_TOPIC_TEMPLATE: Final = (
+SELECTION_DISCOVERY_TOPIC_TEMPLATE: Final = "{prefix}/switch/chime_deck_{instance}_{slug}/config"
+"""Home Assistant discovery topic of one tile's writable ``switch`` (D34)."""
+
+SELECTION_DEFAULT_ENTITY_ID_TEMPLATE: Final = "switch.chime_deck_{slug}"
+"""Preferred entity id of one tile's selection switch (design 02 §9, D34)."""
+
+SELECTION_READ_ONLY_DISCOVERY_TOPIC_TEMPLATE: Final = (
     "{prefix}/binary_sensor/chime_deck_{instance}_{slug}/config"
 )
-"""Home Assistant discovery topic of one tile's ``binary_sensor``."""
+"""Discovery topic of the PRE-D34 read-only selection ``binary_sensor`` this release purges.
 
-SELECTION_DEFAULT_ENTITY_ID_TEMPLATE: Final = "binary_sensor.chime_deck_{slug}"
-"""Preferred entity id of one tile's selection sensor (design 02 §9)."""
+These configs are blanked with a **retained** empty payload: an empty payload is
+Home Assistant's only removal signal for a discovery topic, and the retained form
+is what also clears the retained config a pre-D34 build left on the broker. They
+are purged BEFORE the switch config is published, so an upgraded install never
+shows a dead read-only entity beside the switch — and a broker that was down at
+upgrade time converges on the next republish, because the blank is unconditional.
+"""
+
+SELECTION_COMMAND_TOPIC_PREFIX_TEMPLATE: Final = "chime_deck/{instance}/selection/"
+"""Common prefix of one tile's command topic and of the filter that subscribes to them.
+
+Spelled once and derived from below, so the command grammar cannot drift between
+the topic Home Assistant publishes to, the filter this service subscribes and the
+parser that routes an incoming topic back to a slug.
+"""
+
+SELECTION_COMMAND_TOPIC_TEMPLATE: Final = SELECTION_COMMAND_TOPIC_PREFIX_TEMPLATE + "{slug}/set"
+"""Command topic of one tile's selection switch: where Home Assistant writes the value."""
+
+SELECTION_COMMAND_FILTER_TEMPLATE: Final = SELECTION_COMMAND_TOPIC_PREFIX_TEMPLATE + "+/set"
+"""The one wildcard subscription covering every tile's command topic."""
+
+SELECTION_COMMAND_QOS: Final = 1
+"""QoS of the selection command subscription.
+
+At-least-once, unlike the button presses: a missed ``off`` leaves a tile armed,
+which is the one failure D29 §4 exists to prevent. The payload itself carries no
+``qos`` key, because design 02 §9's example has none — the switch's delivery
+semantics come from our subscription, not from the discovery payload.
+"""
 
 SELECTION_KEY_ORDER: Final[tuple[str, ...]] = (
     "name",
     "unique_id",
     "default_entity_id",
     "state_topic",
+    "command_topic",
+    "state_on",
+    "state_off",
     "payload_on",
     "payload_off",
     "icon",
@@ -347,11 +423,13 @@ SELECTION_KEY_ORDER: Final[tuple[str, ...]] = (
     "payload_not_available",
     "device",
 )
-"""Design 02 §9's ``binary_sensor`` keys, in the order the payload is serialised.
+"""Design 02 §9's ``switch`` keys, in the order the payload is serialised.
 
-There is deliberately no ``command_topic`` (the sensor is read-only), no
-``device_class`` (none is suitable), and no ``qos``/``retain``/``entity_category``
-(§9's example carries none of them).
+D34 makes the entity *writable*: ``state_on``/``state_off`` say how the value on
+the state topic is interpreted, while ``payload_on``/``payload_off`` are what Home
+Assistant sends on the command topic and what we publish as the state. There is
+deliberately no ``device_class`` (none is suitable), and no
+``qos``/``retain``/``entity_category`` (§9's example carries none of them).
 """
 
 _SELECTION_SLUG_SEPARATORS: Final = re.compile(r"[^a-z0-9]+")
@@ -436,8 +514,8 @@ def selection_slug(entity: Entity) -> str:
     Assistant's *object id* grammar, which forbids a dash
     (``_OBJECT_ID = r"(?!_)[\\da-z_]+(?<!_)"`` in ``homeassistant/core.py``).
     Home Assistant silently slugifies an invalid ``default_entity_id``, so a dash
-    slug would publish ``binary_sensor.chime_deck_washing-machine`` while
-    registering ``binary_sensor.chime_deck_washing_machine``, and the
+    slug would publish ``switch.chime_deck_washing-machine`` while
+    registering ``switch.chime_deck_washing_machine``, and the
     payload, the state topic and the unique id would all disagree with the entity
     id an automation has to reference. "Dryer" is therefore ``dryer`` and
     "Washing Machine" is ``washing_machine``.
@@ -493,7 +571,7 @@ def selection_entity_id_slug(entity_id: str) -> str:
 
 
 def selection_unique_id(settings: MqttSettings, slug: str) -> str:
-    """Return the stable unique id of one tile's selection sensor.
+    """Return the stable unique id of one tile's selection switch.
 
     :param settings: MQTT settings holding the instance id.
     :param slug: selection slug derived by :func:`selection_slug`.
@@ -502,7 +580,7 @@ def selection_unique_id(settings: MqttSettings, slug: str) -> str:
 
 
 def selection_state_topic(settings: MqttSettings, slug: str) -> str:
-    """Return the retained state topic of one tile's selection sensor.
+    """Return the retained state topic of one tile's selection switch.
 
     :param settings: MQTT settings holding the instance id.
     :param slug: selection slug derived by :func:`selection_slug`.
@@ -510,8 +588,31 @@ def selection_state_topic(settings: MqttSettings, slug: str) -> str:
     return SELECTION_STATE_TOPIC_TEMPLATE.format(instance=settings.instance_id, slug=slug)
 
 
+def selection_command_topic(settings: MqttSettings, slug: str) -> str:
+    """Return the command topic Home Assistant writes one tile's value to.
+
+    :param settings: MQTT settings holding the instance id.
+    :param slug: selection slug derived by :func:`selection_slug`.
+    """
+    return SELECTION_COMMAND_TOPIC_TEMPLATE.format(instance=settings.instance_id, slug=slug)
+
+
+def selection_command_filter(settings: MqttSettings) -> str:
+    """Return the one wildcard filter covering every tile's selection command topic.
+
+    One subscription for every tile rather than one per tile: the filter is
+    derived from the same prefix as :func:`selection_command_topic`, so a slug
+    this process has never heard of still arrives and can be *answered* rather
+    than silently ignored (:meth:`MqttDiscovery._selection_slug_from_command_topic`
+    is what turns a matching topic back into a slug).
+
+    :param settings: MQTT settings holding the instance id.
+    """
+    return SELECTION_COMMAND_FILTER_TEMPLATE.format(instance=settings.instance_id)
+
+
 def selection_discovery_topic(settings: MqttSettings, slug: str) -> str:
-    """Return the discovery topic of one tile's ``binary_sensor``.
+    """Return the discovery topic of one tile's writable ``switch``.
 
     :param settings: MQTT settings holding the discovery prefix and instance id.
     :param slug: selection slug derived by :func:`selection_slug`.
@@ -523,8 +624,24 @@ def selection_discovery_topic(settings: MqttSettings, slug: str) -> str:
     )
 
 
+def selection_read_only_discovery_topic(settings: MqttSettings, slug: str) -> str:
+    """Return the discovery topic of the PRE-D34 read-only selection entity.
+
+    Only ever used to blank the entity: this build announces a ``switch``, and a
+    pre-D34 build's ``binary_sensor`` must not survive beside it (D34 §6).
+
+    :param settings: MQTT settings holding the discovery prefix and instance id.
+    :param slug: selection slug the read-only entity was published under.
+    """
+    return SELECTION_READ_ONLY_DISCOVERY_TOPIC_TEMPLATE.format(
+        prefix=settings.discovery_prefix,
+        instance=settings.instance_id,
+        slug=slug,
+    )
+
+
 def selection_default_entity_id(slug: str) -> str:
-    """Return the preferred Home Assistant entity id of one selection sensor.
+    """Return the preferred Home Assistant entity id of one selection switch.
 
     :param slug: selection slug derived by :func:`selection_slug`.
     """
@@ -697,7 +814,7 @@ def _device_block(
 
     One builder for both entity types is what makes "every entity groups under
     one Home Assistant device" true by construction: a button and a selection
-    sensor cannot drift apart on the identifiers, the name or the version.
+    switch cannot drift apart on the identifiers, the name or the version.
 
     :param settings: MQTT settings holding the instance id and the device name.
     :param configuration_url: device configuration URL, or ``None`` to omit it.
@@ -760,13 +877,16 @@ def build_selection_payload(
     configuration_url: str | None = None,
     sw_version: str = __version__,
 ) -> dict[str, object]:
-    """Build one design 02 §9 selection ``binary_sensor`` payload.
+    """Build one design 02 §9 selection ``switch`` payload (D34).
 
-    Exactly the eleven keys of :data:`SELECTION_KEY_ORDER`, with the same
-    ``device`` block :func:`build_discovery_payload` uses. There is no
-    ``command_topic``: the sensor is read-only, ``on`` meaning the tile is
-    selected. ``retain`` is absent because it is a *publisher* decision, not a
-    payload field; the state publish is the retained one.
+    Exactly the fourteen keys of :data:`SELECTION_KEY_ORDER`, with the same
+    ``device`` block :func:`build_discovery_payload` uses. D34 makes the entity
+    writable: it carries a ``command_topic`` beside the ``state_topic``, with
+    ``state_on``/``state_off`` reusing :data:`SELECTION_PAYLOAD_ON`/
+    :data:`SELECTION_PAYLOAD_OFF` (one source of truth for ``on``/``off``) and
+    ``payload_on``/``payload_off`` being what Home Assistant sends. ``retain`` is
+    absent because it is a *publisher* decision, not a payload field; the state
+    publish is the retained one.
 
     The slug is a required argument rather than something derived here: a
     disambiguated tile's slug depends on the *whole* tile set, so only the caller
@@ -786,6 +906,9 @@ def build_selection_payload(
         "unique_id": selection_unique_id(settings, slug),
         "default_entity_id": selection_default_entity_id(slug),
         "state_topic": selection_state_topic(settings, slug),
+        "command_topic": selection_command_topic(settings, slug),
+        "state_on": SELECTION_PAYLOAD_ON,
+        "state_off": SELECTION_PAYLOAD_OFF,
         "payload_on": SELECTION_PAYLOAD_ON,
         "payload_off": SELECTION_PAYLOAD_OFF,
         "icon": SELECTION_ICON,
@@ -895,9 +1018,9 @@ class ButtonReader(Protocol):
 
 
 class EntityReader(Protocol):
-    """The narrow store port the selection sensors need, satisfied by ``ConfigStore``.
+    """The narrow store port the selection switches need, satisfied by ``ConfigStore``.
 
-    Only the *list* read is needed: the selection sensors are resynchronised from
+    Only the *list* read is needed: the selection switches are resynchronised from
     a full listing rather than from per-slug diffs (see
     :meth:`MqttDiscovery.on_entities_changed`).
     """
@@ -975,7 +1098,7 @@ def _rename_pairs(value: object) -> tuple[tuple[str, str], ...]:
 
 
 class MqttDiscovery:
-    """Publish discovery, keep it in step with the store and route presses.
+    """Publish discovery, keep it in step with the store, route presses and selection commands.
 
     Wire it exactly like this (HSD-dtpo owns the wiring)::
 
@@ -1010,7 +1133,7 @@ class MqttDiscovery:
         sw_version: str = __version__,
         read_timeout_s: float = DEFAULT_READ_TIMEOUT_S,
         entities: EntityReader | None = None,
-        selection: SelectionLookup = NO_SELECTION,
+        selection: SelectionWriter = NO_SELECTION,
     ) -> None:
         """Prepare the service; nothing is published until :meth:`start`.
 
@@ -1027,9 +1150,11 @@ class MqttDiscovery:
         :param sw_version: software version for the device block.
         :param read_timeout_s: bound for one discovery store read.
         :param entities: the store's entity reads; a build with no reader
-            publishes no selection sensors, mirroring
+            publishes no selection switches, mirroring
             ``StateHub(selection=NO_SELECTION)``.
-        :param selection: the volatile D29 tile selection the state publishes read.
+        :param selection: the volatile selection (D29 as amended by D34): a state
+            publish *reads* it and an incoming Home Assistant command *writes* it,
+            both through the same service, so there is one source of truth.
         :raises MqttConfigurationError: if ``read_timeout_s`` is not positive.
         """
         if read_timeout_s <= 0:
@@ -1054,10 +1179,14 @@ class MqttDiscovery:
         # no publish-diff cache here: a selection state must never be suppressed,
         # and the config payload is one extra packet per tile per republish.
         self._selection_slugs: dict[str, str] = {}
-        # Entity id -> slug: the synchronous lookup the toggle path needs, because
-        # reading the entity list to re-derive a slug is async and
-        # ``on_selection_changed`` is not.
+        # Entity id -> slug: the synchronous lookup the toggle path and the command
+        # handler need, because reading the entity list to re-derive a slug is async
+        # and ``on_selection_changed`` is not.
         self._selection_slug_by_entity: dict[str, str] = {}
+        # Subscribed once, from the announce path, exactly like the press topics:
+        # one wildcard filter covers every tile, so a SETSUBSCRIBE per republish
+        # would be pure churn.
+        self._selection_commands_subscribed = False
         self._unsubscribe_bus: Callable[[], None] | None = None
         self._logger = logging.getLogger(__name__)
         composed_prefix = f"{DEVICE_ID_TEMPLATE.format(instance=self._settings.instance_id)}_"
@@ -1121,12 +1250,14 @@ class MqttDiscovery:
             self._logger.exception("purging the pre-rename MQTT entities failed")
 
     async def stop(self) -> None:
-        """Unsubscribe from the bus and every command topic. Publishes nothing.
+        """Unsubscribe from the bus, every press topic and the selection commands.
 
         Design 02 §5: a clean shutdown only publishes the availability
-        ``offline``, which the bridge owns. The command topics come from the
-        router, never re-derived, so an orphaned filter cannot survive. Safe to
-        call twice.
+        ``offline``, which the bridge owns. The press topics come from the
+        router, never re-derived, so an orphaned filter cannot survive; the one
+        selection command filter is dropped only when this service subscribed it,
+        and its flag is cleared with the rest of the bookkeeping. Safe to call
+        twice.
         """
         unsubscribe = self._unsubscribe_bus
         self._unsubscribe_bus = None
@@ -1135,6 +1266,9 @@ class MqttDiscovery:
         for topic in tuple(self._topic_slugs):
             self._bridge.unsubscribe(topic)
         self._topic_slugs.clear()
+        if self._selection_commands_subscribed:
+            self._bridge.unsubscribe(selection_command_filter(self._settings))
+            self._selection_commands_subscribed = False
         self._selection_slugs.clear()
         self._selection_slug_by_entity.clear()
         self._published.clear()
@@ -1156,7 +1290,7 @@ class MqttDiscovery:
             try:
                 self._retract_selection(slug)
             except Exception:
-                self._logger.exception("retracting the selection sensor for %s failed", slug)
+                self._logger.exception("retracting the selection switch for %s failed", slug)
 
     async def on_birth(self) -> None:
         """Republish every discovery payload after a connect or an HA birth.
@@ -1184,7 +1318,7 @@ class MqttDiscovery:
         try:
             await self.republish_selections()
         except Exception:
-            self._logger.exception("republishing the selection sensors failed")
+            self._logger.exception("republishing the selection switches failed")
         try:
             await self.purge_legacy_entities()
         except Exception:
@@ -1254,7 +1388,7 @@ class MqttDiscovery:
         return RepublishReport(announced=announced, failed=tuple(failed))
 
     async def republish_selections(self) -> None:
-        """Announce every displayed tile as a selection ``binary_sensor``, then prune.
+        """Announce every displayed tile as a selection ``switch``, then prune.
 
         Runs at :meth:`start`, on every connect and Home Assistant birth (through
         :meth:`on_birth`) and on every ``config.entities_changed``. The read is
@@ -1262,9 +1396,14 @@ class MqttDiscovery:
         publishing anything*, because a partial blanking is worse than a stale
         entity — the same rule :meth:`republish_all` follows.
 
-        A build with no entity reader publishes no selection sensors at all. Never
-        raises: each tile's publish and each retraction has its own ``except``, so
-        one bad tile cannot swallow the rest.
+        One tile's announcement (:meth:`_publish_selection`) also blanks that
+        tile's pre-D34 read-only ``binary_sensor`` config and subscribes the one
+        selection command filter, so this method is what makes the writable side
+        work as well as what makes the entity visible.
+
+        A build with no entity reader publishes no selection switches at all.
+        Never raises: each tile's publish and each retraction has its own
+        ``except``, so one bad tile cannot swallow the rest.
 
         The naming source is the tile's display name (:func:`selection_slug`) and
         the collision rule is :func:`assign_selection_slugs`: every tile of a
@@ -1289,7 +1428,7 @@ class MqttDiscovery:
         if reader is None:
             self._logger.debug(
                 "no entity reader is wired into the MQTT discovery service; no selection "
-                "sensors will be published"
+                "switches will be published"
             )
             return
         try:
@@ -1312,7 +1451,7 @@ class MqttDiscovery:
                 self._publish_selection(entity, slug)
             except Exception:
                 self._logger.exception(
-                    "publishing the selection sensor for %s failed", entity.entity_id
+                    "publishing the selection switch for %s failed", entity.entity_id
                 )
         # The legacy purge runs BEFORE the prune loop by design: the prune loop
         # retracts every slug this process has bookkeeping for and the legacy loop
@@ -1325,7 +1464,7 @@ class MqttDiscovery:
                 self._retract_legacy_selection(legacy)
             except Exception:
                 self._logger.exception(
-                    "retracting the pre-HSD-jw0x selection sensor %s failed", legacy
+                    "retracting the pre-HSD-jw0x selection switch %s failed", legacy
                 )
         for slug in tuple(self._selection_slugs):
             if slug in desired:
@@ -1333,7 +1472,7 @@ class MqttDiscovery:
             try:
                 self._retract_selection(slug)
             except Exception:
-                self._logger.exception("retracting the selection sensor for %s failed", slug)
+                self._logger.exception("retracting the selection switch for %s failed", slug)
 
     async def purge_legacy_entities(self) -> LegacyPurgeReport:
         """Purge every PRE-RENAME entity this build can reconstruct. Never raises.
@@ -1355,7 +1494,9 @@ class MqttDiscovery:
         enabled in the old build left an entity that is still a ghost, and
         blanking a topic nothing published is a harmless no-op), every current
         selection slug and every pre-HSD-jw0x entity-id slug (so a deployment that
-        skipped the jw0x release is covered too), and the availability topic.
+        skipped the jw0x release is covered too) **in both discovery families**
+        (the pre-D34 ``binary_sensor`` and the ``switch`` this build announces),
+        and the availability topic.
 
         The empty *retained* publishes are purges for the reason
         :meth:`_retract_selection` documents: a stale retained ``on`` (or a stale
@@ -1427,7 +1568,15 @@ class MqttDiscovery:
         for slug in selection_slugs:
             if not slug:
                 continue
+            # Both families, because ``chime_deck.mqtt.legacy.legacy_topic``
+            # substitutes project TOKENS only and does not touch the platform
+            # segment (design 02 §1's discovery path is
+            # ``<prefix>/<platform>/...``). The ``binary_sensor`` family is what
+            # the pre-rename build actually published, so dropping it would
+            # silently stop purging those ghosts; the ``switch`` family is what a
+            # *future* rename will need.
             discovery_topics.add(selection_discovery_topic(self._settings, slug))
+            discovery_topics.add(selection_read_only_discovery_topic(self._settings, slug))
             state_topics.add(selection_state_topic(self._settings, slug))
         state_topics.add(self._availability_topic)
         purged: list[str] = []
@@ -1460,13 +1609,17 @@ class MqttDiscovery:
         return LegacyPurgeReport(purged=tuple(sorted(purged)), failed=tuple(failed))
 
     def on_selection_changed(self, entity_id: str, selected: bool) -> None:
-        """Publish the retained state of one tile after a toggle. Never raises.
+        """Publish the retained state of one tile after a change. Never raises.
 
         This publishes the *state only*: the discovery config is published by
         :meth:`republish_selections`, which runs at :meth:`start`, on every
-        connect/birth and on every ``config.entities_changed``, so a toggle that
+        connect/birth and on every ``config.entities_changed``, so a change that
         outruns a config publish cannot leave Home Assistant without an entity
         for longer than the next event.
+
+        It is the single ``on_change`` the selection service calls, which is why a
+        panel tap *and* an accepted Home Assistant command both land here exactly
+        once: the hub frame and this retained publish come from one point.
 
         The slug comes from ``self._selection_slug_by_entity``, the map
         :meth:`republish_selections` fills, because a disambiguated tile's slug
@@ -1479,27 +1632,40 @@ class MqttDiscovery:
 
         It deliberately does not consult ``self._selection``: the caller (the
         selection service's change callback) already holds the new value, and
-        re-reading it would only let a second toggle in the same tick overwrite
+        re-reading it would only let a second change in the same tick overwrite
         this one's payload with its own.
 
         Synchronous because the bridge's ``publish`` contract is "call it from the
-        event loop", and the toggle route already runs there; the broker call is
-        buffered while disconnected.
+        event loop", and the toggle route and the command handler already run
+        there; the broker call is buffered while disconnected.
 
         :param entity_id: Home Assistant entity id whose selection changed.
         :param selected: the new value, ``True`` when the tile is selected.
         """
-        try:
-            slug = self._selection_slug_by_entity.get(entity_id) or selection_entity_id_slug(
-                entity_id
+        slug = self._selection_slug_by_entity.get(entity_id) or selection_entity_id_slug(entity_id)
+        if not is_mqtt_safe_slug(slug):
+            self._logger.warning(
+                "entity %r has no usable selection slug; cannot publish its selection state",
+                entity_id,
             )
-            if not is_mqtt_safe_slug(slug):
-                self._logger.warning(
-                    "entity %r has no usable selection slug; cannot publish its selection state",
-                    entity_id,
-                )
-                return
-            payload = SELECTION_PAYLOAD_ON if selected else SELECTION_PAYLOAD_OFF
+            return
+        self._publish_selection_state(
+            slug, SELECTION_PAYLOAD_ON if selected else SELECTION_PAYLOAD_OFF
+        )
+
+    def _publish_selection_state(self, slug: str, payload: str) -> None:
+        """Publish one tile's retained selection state. Never raises.
+
+        The one place a selection state reaches the broker, so the publish, its
+        QoS and its ``retain`` flag cannot drift between its three callers: the
+        change seam (:meth:`on_selection_changed`), the announce path
+        (:meth:`_publish_selection`) and the corrective answer
+        (:meth:`_answer_selection_command`).
+
+        :param slug: the tile's validated selection slug.
+        :param payload: :data:`SELECTION_PAYLOAD_ON` or :data:`SELECTION_PAYLOAD_OFF`.
+        """
+        try:
             self._bridge.publish(
                 selection_state_topic(self._settings, slug),
                 payload,
@@ -1509,13 +1675,13 @@ class MqttDiscovery:
         except Exception as exc:
             self._logger.warning(
                 "publishing the selection state of %s failed: %s: %s",
-                entity_id,
+                slug,
                 type(exc).__name__,
                 exc,
             )
 
     async def on_entities_changed(self, event: ConfigEvent) -> None:
-        """Resynchronise the selection sensors after a committed entity change.
+        """Resynchronise the selection switches after a committed entity change.
 
         Every other event name is ignored. The resync is a *full listing* rather
         than the button-style per-slug diff on purpose: ``config.entities_changed``
@@ -1545,7 +1711,7 @@ class MqttDiscovery:
 
         ``config.buttons_changed`` keeps its per-slug lifecycle
         (:meth:`on_buttons_changed`), ``config.entities_changed`` resynchronises
-        the selection sensors (:meth:`on_entities_changed`), and every other name
+        the selection switches (:meth:`on_entities_changed`), and every other name
         is ignored. One handler means one subscription and one unsubscribe, which
         is what :meth:`start` and :meth:`stop` maintain.
 
@@ -1585,18 +1751,29 @@ class MqttDiscovery:
         except Exception:
             self._logger.exception("handling a buttons-changed event failed")
 
-    async def on_message(self, topic: str, payload: bytes) -> None:
-        """Route one incoming command-topic message to the press service.
+    async def on_message(self, topic: str, payload: bytes, retain: bool = False) -> None:
+        """Route one incoming message: a press, else a selection command.
 
-        The payload comparison is strict bytes equality: ``b""``, ``b"press"``,
-        ``b"PRESS\\n"``, ``b"PRESS "`` and binary garbage are all ignored, with
-        no decode and no strip.
+        The bridge hands over the broker's RETAIN flag for *this delivery* — a
+        replay marker, not the publisher's intent — because a retained selection
+        command is a replay of an old intent and must be refused
+        (:meth:`_handle_selection_command`). ``False`` is the default so a caller
+        that has no flag (a test, a backfill) still reads as "live".
 
-        There is no timeout around ``press`` on purpose: the bridge already bounds
-        the whole callback with ``seam_timeout_s``, so a second, shorter deadline
-        here would only pre-empt the one owner of the budget — and a cancel
-        between ``PressService.press`` arming its dedupe window and writing its
+        The press half is unchanged: the payload comparison is strict bytes
+        equality, so ``b""``, ``b"press"``, ``b"PRESS\\n"``, ``b"PRESS "`` and
+        binary garbage are all ignored, with no decode and no strip. There is no
+        timeout around ``press`` on purpose: the bridge already bounds the whole
+        callback with ``seam_timeout_s``, so a second, shorter deadline here would
+        only pre-empt the one owner of the budget — and a cancel between
+        ``PressService.press`` arming its dedupe window and writing its
         ``press_log`` row would lose the row and suppress the retry.
+
+        The command half accepts one well-formed slug on a topic this build can
+        parse (:meth:`_selection_slug_from_command_topic`) and never raises: a
+        malformed, unknown or replayed command is answered with a republish of the
+        current state rather than an exception, because Home Assistant's switch is
+        *optimistic* and would otherwise sit on a value no one confirmed.
 
         A ``homeassistant/status`` message never arrives here: the bridge consumes
         its own status topic before the message seam and owns the
@@ -1604,20 +1781,155 @@ class MqttDiscovery:
 
         :param topic: topic the message arrived on.
         :param payload: raw payload bytes.
+        :param retain: the broker's RETAIN flag for this delivery; ``True`` means
+            the broker is replaying a stored message, not delivering a live one.
         """
         slug = self._topic_slugs.get(topic)
-        if slug is None:
+        if slug is not None:
+            if payload != PRESS_BYTES:
+                self._logger.debug(
+                    "ignoring the payload %r on %s: only %r presses the button",
+                    payload,
+                    topic,
+                    PRESS_PAYLOAD,
+                )
+                return
+            await self._press.press(slug, source=MQTT_PRESS_SOURCE)
+            return
+        command_slug = self._selection_slug_from_command_topic(topic)
+        if command_slug is None:
             self._logger.debug("ignoring an MQTT message on the unknown topic %s", topic)
             return
-        if payload != PRESS_BYTES:
-            self._logger.debug(
-                "ignoring the payload %r on %s: only %r presses the button",
+        self._handle_selection_command(command_slug, payload, retain=retain)
+
+    def _selection_slug_from_command_topic(self, topic: str) -> str | None:
+        """Return the selection slug a command topic names, or ``None``.
+
+        Parsed by slicing, never by a regex: the prefix, the ``/set`` suffix and a
+        single well-formed slug in between are the whole grammar, and
+        :data:`SELECTION_COMMAND_TOPIC_PREFIX_TEMPLATE` is the one place it is
+        spelled — the same template :func:`selection_command_filter` subscribes
+        with, so the filter and the parser cannot disagree.
+
+        This is why the ``+/set`` wildcard is safe. A stale switch whose tile was
+        deleted still publishes to a *knowable* slug (Home Assistant keeps trying
+        its last known command topic), so the command lands on a slug this process
+        can look up and gets a corrective answer instead of silence. Anything that
+        is not exactly one well-formed slug — an empty middle, a nested slash, a
+        slug :func:`is_mqtt_safe_slug` refuses — is not a selection command at all.
+
+        :param topic: topic an incoming message arrived on.
+        :returns: the slug the topic addresses, or ``None`` when it is not one of
+            this instance's selection command topics.
+        """
+        prefix = SELECTION_COMMAND_TOPIC_PREFIX_TEMPLATE.format(instance=self._settings.instance_id)
+        suffix = "/set"
+        if not topic.startswith(prefix) or not topic.endswith(suffix):
+            return None
+        middle = topic[len(prefix) : -len(suffix)]
+        if not middle or "/" in middle:
+            return None
+        if not is_mqtt_safe_slug(middle):
+            return None
+        return middle
+
+    def _handle_selection_command(self, slug: str, payload: bytes, *, retain: bool) -> None:
+        """Apply one inbound Home Assistant command to a tile's selection.
+
+        Synchronous, like :meth:`on_selection_changed`, because
+        :meth:`~chime_deck.selection.SelectionService.set` and
+        ``bridge.publish`` are both called from the event loop and the bridge's
+        publish contract is "call me from the event loop"; the broker call is
+        buffered while disconnected.
+
+        The value is *set*, never flipped: a command names the value it wants, so
+        a repeated ``on`` is an idempotent confirm, not a toggle. Every refusal is
+        answered with a republish of the current state — never swallowed, because
+        Home Assistant's switch is optimistic and would keep showing a value no
+        one accepted:
+
+        1. a **retained** command is refused: it is a replay of an old intent, and
+           acting on it would re-arm the tile on every reconnect;
+        2. a payload that is neither ``b"on"`` nor ``b"off"`` is refused, and the
+           decision is never made on a decoded string;
+        3. a slug no *displayed* tile has is refused;
+        4. a command that repeats the current value is a confirm: it answers once
+           and produces no ``on_change``, so no hub frame and no second publish;
+        5. an accepted command goes through the selection service's single write,
+           and a writer that did not take the value (e.g. :data:`NO_SELECTION`) is
+           answered rather than left to make HA's optimism a lie.
+
+        :param slug: selection slug the command topic addressed.
+        :param payload: raw payload bytes.
+        :param retain: whether the broker replayed this message.
+        """
+        if retain:
+            self._logger.info(
+                "refused the retained command %r on %s: a retained command is a replay of an old "
+                "intent, not a live one, and processing it would re-arm the tile on every "
+                "reconnect; republished its state",
                 payload,
-                topic,
-                PRESS_PAYLOAD,
+                selection_command_topic(self._settings, slug),
             )
+            self._answer_selection_command(slug)
             return
-        await self._press.press(slug, source=MQTT_PRESS_SOURCE)
+        if payload == SELECTION_PAYLOAD_ON.encode():
+            selected = True
+        elif payload == SELECTION_PAYLOAD_OFF.encode():
+            selected = False
+        else:
+            self._logger.info(
+                "ignored the malformed command %r on %s: only b'on' and b'off' set a tile; "
+                "republished its state",
+                payload,
+                selection_command_topic(self._settings, slug),
+            )
+            self._answer_selection_command(slug)
+            return
+        entity_id = self._selection_slugs.get(slug)
+        if entity_id is None:
+            self._logger.info(
+                "refused the command %r on %s: no displayed tile has that selection slug; "
+                "republished its state",
+                payload,
+                selection_command_topic(self._settings, slug),
+            )
+            self._answer_selection_command(slug)
+            return
+        if self._selection.is_selected(entity_id) == selected:
+            self._logger.debug(
+                "the command on %s already matches the current state; republished it without churn",
+                selection_command_topic(self._settings, slug),
+            )
+            self._answer_selection_command(slug)
+            return
+        self._selection.set(entity_id, selected)
+        if self._selection.is_selected(entity_id) != selected:
+            self._logger.info(
+                "the selection service did not take %r on %s; republished its state",
+                selected,
+                selection_command_topic(self._settings, slug),
+            )
+            self._answer_selection_command(slug)
+
+    def _answer_selection_command(self, slug: str) -> None:
+        """Republish one tile's state so Home Assistant's optimistic switch snaps back.
+
+        The corrective answer every refusal ends with. A slug this process does not
+        know is answered ``off``: an unknown id is unselected by contract, so a
+        tile that is not displayed (a deleted one, whose switch HA has not dropped
+        yet) is told the truth instead of being left on.
+
+        The publish itself is guarded by :meth:`_publish_selection_state`, so a
+        broker problem is logged there once rather than twice.
+
+        :param slug: selection slug the refused command addressed.
+        """
+        entity_id = self._selection_slugs.get(slug)
+        selected = entity_id is not None and self._selection.is_selected(entity_id)
+        self._publish_selection_state(
+            slug, SELECTION_PAYLOAD_ON if selected else SELECTION_PAYLOAD_OFF
+        )
 
     async def _handle_event(self, payload: Mapping[str, object]) -> None:
         """Apply the three lifecycle phases of one buttons-changed payload.
@@ -1803,49 +2115,77 @@ class MqttDiscovery:
         )
 
     def _publish_selection(self, entity: Entity, slug: str) -> None:
-        """Announce one tile's sensor, config first, then its retained state.
+        """Announce one tile's writable switch and its retained state.
 
-        The config goes first so Home Assistant already knows the entity when the
-        state arrives; it is non-retained, like a button's, while the state is
-        retained and at :data:`SELECTION_STATE_QOS`.
+        Four steps, in this order:
+
+        1. Blank the PRE-D34 read-only ``binary_sensor`` config with a **retained**
+           empty payload. It is unconditional on every republish, not gated on
+           ``self._selection_slugs``: the blank is idempotent and leaves nothing to
+           remember, so an install whose Home Assistant was down or restarting when
+           it upgraded still converges on the next republish. Retained *here*,
+           while the switch config below is not, because this payload is a
+           *removal*: Home Assistant's empty-config signal and the retained config a
+           pre-D34 build may have left on the broker are the same message, and only
+           the retained form clears the broker's copy too.
+        2. Subscribe the one selection command filter, once, on the first announce
+           — the same "subscribe once, in the announce path" rule
+           :meth:`_publish` follows for the press topics, so a republish never
+           re-SUBSCRIBEs, not even for a slug deleted and re-created in between.
+        3. Publish the switch config, non-retained like a button's, **before** any
+           state: Home Assistant has to know the entity when the value arrives.
+        4. Publish the retained state at :data:`SELECTION_STATE_QOS`.
 
         :param entity: the displayed entity to announce.
         :param slug: its already-validated selection slug.
         """
+        self._bridge.publish(
+            selection_read_only_discovery_topic(self._settings, slug),
+            "",
+            qos=DISCOVERY_PUBLISH_QOS,
+            retain=True,
+        )
+        if not self._selection_commands_subscribed:
+            self._bridge.subscribe(selection_command_filter(self._settings), SELECTION_COMMAND_QOS)
+            self._selection_commands_subscribed = True
         self._bridge.publish(
             selection_discovery_topic(self._settings, slug),
             self._serialise_selection(entity, slug),
             qos=DISCOVERY_PUBLISH_QOS,
             retain=False,
         )
-        self._bridge.publish(
-            selection_state_topic(self._settings, slug),
-            self._selection_state(entity.entity_id),
-            qos=SELECTION_STATE_QOS,
-            retain=True,
-        )
+        self._publish_selection_state(slug, self._selection_state(entity.entity_id))
         self._selection_slugs[slug] = entity.entity_id
         self._selection_slug_by_entity[entity.entity_id] = slug
 
     def _retract_selection(self, slug: str) -> None:
-        """Remove one tile's sensor, including its retained state value.
+        """Remove one tile's switch, including its retained state value.
 
-        The empty discovery payload is the only removal signal Home Assistant has
-        for a non-retained config. The empty *retained* state publish is a purge:
-        without it a deleted tile's retained ``on`` would outlive it forever on a
-        topic nothing will ever write again — the exact stale-retained hazard
-        D29/§9 exists to avoid.
+        Three blanks, because a delete must leave nothing behind: the PRE-D34
+        read-only ``binary_sensor`` config (a retained empty payload, so a broker
+        that still holds that config from an earlier build drops it as well), the
+        switch config (an empty *non-retained* payload is the only removal signal
+        Home Assistant has for it) and the empty **retained** state, without which
+        a deleted tile's retained ``on`` would outlive it forever on a topic
+        nothing will ever write again — the exact stale-retained hazard D29/§9
+        exists to avoid.
 
         A slug that was never announced is a quiet no-op, mirroring
         :meth:`_retract`.
 
-        :param slug: selection slug whose sensor should be removed.
+        :param slug: selection slug whose switch should be removed.
         """
         if slug not in self._selection_slugs:
             self._logger.debug(
-                "nothing to retract for the selection sensor %s: it was never announced", slug
+                "nothing to retract for the selection switch %s: it was never announced", slug
             )
             return
+        self._bridge.publish(
+            selection_read_only_discovery_topic(self._settings, slug),
+            "",
+            qos=DISCOVERY_PUBLISH_QOS,
+            retain=True,
+        )
         self._bridge.publish(
             selection_discovery_topic(self._settings, slug),
             "",
@@ -1871,22 +2211,33 @@ class MqttDiscovery:
     def _retract_legacy_selection(self, slug: str) -> None:
         """Purge one PRE-HSD-jw0x selection entity from the broker.
 
-        The upgrade ghost-buster. An upgraded app announces the display-name slug,
-        and the entity the old build announced — plus its retained state — would
-        otherwise live on the broker forever, because discovery is not retained and
-        the old slug is not in any bookkeeping a freshly restarted process holds.
+        The upgrade ghost-buster, and it now covers **both eras**: a pre-jw0x build
+        published a ``binary_sensor`` under an entity-id slug, a jw0x build
+        published a ``binary_sensor`` under the display-name slug, and this build
+        publishes a ``switch``. So the blank covers the read-only config of either
+        old naming rule, the switch config of the new one, and the retained state
+        either of them wrote.
+
         The old slug is still *computable* from the entity id
-        (:func:`selection_entity_id_slug`), which is why that rule is kept.
+        (:func:`selection_entity_id_slug`), which is what makes this possible for a
+        freshly restarted process that holds no bookkeeping for the old entity at
+        all.
 
         It is deliberately NOT gated on ``self._selection_slugs`` membership — that
         gate is exactly the knowledge the redeploy case lacks — and it does no
-        bookkeeping, because a purge leaves nothing behind to remember. The empty
-        *retained* state publish is a purge for the reason :meth:`_retract_selection`
-        documents: a retained ``on`` on a topic nothing will ever write again would
-        outlive the truth forever (D29/§9).
+        bookkeeping, because a purge leaves nothing behind to remember. The
+        retained blanks are purges for the reason :meth:`_retract_selection`
+        documents: a retained ``on``, and a retained pre-D34 config, on a topic
+        nothing will ever write again would outlive the truth forever (D29/§9).
 
         :param slug: legacy selection slug to purge.
         """
+        self._bridge.publish(
+            selection_read_only_discovery_topic(self._settings, slug),
+            "",
+            qos=DISCOVERY_PUBLISH_QOS,
+            retain=True,
+        )
         self._bridge.publish(
             selection_discovery_topic(self._settings, slug),
             "",
@@ -1935,7 +2286,7 @@ class MqttDiscovery:
         return legacy
 
     def _serialise_selection(self, entity: Entity, slug: str) -> str:
-        """Return the serialised discovery payload of one tile's selection sensor.
+        """Return the serialised discovery payload of one tile's selection switch.
 
         :param entity: displayed entity to serialise.
         :param slug: its resolved selection slug.

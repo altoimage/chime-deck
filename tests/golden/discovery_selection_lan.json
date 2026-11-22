@@ -1,8 +1,11 @@
 {
   "name": "Front Door selected",
   "unique_id": "chime_deck_default_front_door_selected",
-  "default_entity_id": "binary_sensor.chime_deck_front_door",
+  "default_entity_id": "switch.chime_deck_front_door",
   "state_topic": "chime_deck/default/selection/front_door",
+  "command_topic": "chime_deck/default/selection/front_door/set",
+  "state_on": "on",
+  "state_off": "off",
   "payload_on": "on",
   "payload_off": "off",
   "icon": "mdi:gesture-tap-button",
