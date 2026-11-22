@@ -46,6 +46,31 @@ export interface SettingsReader {
   hasSecret(key: string): boolean;
 }
 
+/** The two field groups the Connection panel saves independently. */
+export type ConnectionGroup = 'ha' | 'mqtt';
+
+/**
+ * The settings keys each group's save commits.
+ *
+ * `device.name` belongs to the MQTT group: the MQTT bridge is rebuilt on every
+ * `device.name` change and the server pins `mqtt.instance_id` from the first
+ * name it is given (D32/HSD-vwdy), so a name saved without the broker fields
+ * would describe a unit whose identity the broker has not heard about.
+ */
+export const GROUP_KEYS: Readonly<Record<ConnectionGroup, readonly string[]>> = {
+  ha: ['ha.base_url', 'ha.token'],
+  mqtt: [
+    'device.name',
+    'mqtt.host',
+    'mqtt.port',
+    'mqtt.username',
+    'mqtt.password',
+    'mqtt.tls',
+    'mqtt.discovery_prefix',
+    'mqtt.instance_id'
+  ]
+};
+
 /** Every field a Connection form drafts, secrets included. */
 export interface ConnectionDraft {
   baseUrl: string;
@@ -159,6 +184,33 @@ function adopted<T extends string | boolean>(drafted: T, unfilled: T, stored: T)
   return drafted !== unfilled ? drafted : stored;
 }
 
+/**
+ * The draft rebased onto the echo after a Home Assistant save.
+ *
+ * Only this group's fields are adopted; a cross-group save must never discard
+ * what is typed in the other group.
+ */
+export function rebaseHaFields(draft: ConnectionDraft, reader: SettingsReader): ConnectionDraft {
+  const fresh = draftFrom(reader);
+  return { ...draft, baseUrl: fresh.baseUrl, token: fresh.token, clearToken: fresh.clearToken };
+}
+
+/** The same for the MQTT group; the write-only password is never adopted. */
+export function rebaseMqttFields(draft: ConnectionDraft, reader: SettingsReader): ConnectionDraft {
+  const fresh = draftFrom(reader);
+  return {
+    ...draft,
+    deviceName: fresh.deviceName,
+    host: fresh.host,
+    port: fresh.port,
+    username: fresh.username,
+    tls: fresh.tls,
+    discoveryPrefix: fresh.discoveryPrefix,
+    instanceId: fresh.instanceId,
+    clearPassword: fresh.clearPassword
+  };
+}
+
 /** The port draft as a number, or null when it is not a whole number. */
 export function portNumber(port: string): number | null {
   return /^\d+$/.test(port.trim()) ? Number(port.trim()) : null;
@@ -179,9 +231,22 @@ export function portProblem(draft: ConnectionDraft): string | undefined {
     : 'the port must be a whole number between 1 and 65535';
 }
 
-/** Whether a client-side rule currently blocks the save. */
+/**
+ * Whether a client-side rule blocks THAT group's save, so a bad port cannot
+ * block the other group.
+ */
+export function groupInvalid(draft: ConnectionDraft, group: ConnectionGroup): boolean {
+  switch (group) {
+    case 'ha':
+      return baseUrlProblem(draft) !== undefined;
+    case 'mqtt':
+      return portProblem(draft) !== undefined;
+  }
+}
+
+/** Whether a client-side rule currently blocks the whole-section save. */
 export function draftInvalid(draft: ConnectionDraft): boolean {
-  return baseUrlProblem(draft) !== undefined || portProblem(draft) !== undefined;
+  return groupInvalid(draft, 'ha') || groupInvalid(draft, 'mqtt');
 }
 
 /**
@@ -190,20 +255,16 @@ export function draftInvalid(draft: ConnectionDraft): boolean {
  * new draft or a pending clear, never because a value is stored.
  */
 export function draftDirty(draft: ConnectionDraft, reader: SettingsReader): boolean {
-  return (
-    draft.baseUrl !== reader.text('ha.base_url', DEFAULT_BASE_URL) ||
-    draft.deviceName !== reader.text('device.name', DEFAULT_DEVICE_NAME) ||
-    draft.host !== reader.text('mqtt.host', DEFAULT_HOST) ||
-    portNumber(draft.port) !== reader.integer('mqtt.port', MIN_PORT, MAX_PORT, DEFAULT_PORT) ||
-    draft.username !== reader.text('mqtt.username') ||
-    draft.discoveryPrefix !== reader.text('mqtt.discovery_prefix', DEFAULT_DISCOVERY_PREFIX) ||
-    draft.instanceId !== reader.text('mqtt.instance_id', DEFAULT_INSTANCE_ID) ||
-    draft.tls !== reader.flag('mqtt.tls', false) ||
-    draft.token !== '' ||
-    draft.password !== '' ||
-    draft.clearToken ||
-    draft.clearPassword
-  );
+  return groupDirty(draft, reader, 'ha') || groupDirty(draft, reader, 'mqtt');
+}
+
+/** Whether THAT group has unsaved changes, so its save button is its dirty indicator. */
+export function groupDirty(
+  draft: ConnectionDraft,
+  reader: SettingsReader,
+  group: ConnectionGroup
+): boolean {
+  return Object.keys(groupPatch(draft, reader, group)).length > 0;
 }
 
 /** Only the changed keys; a secret contributes nothing unless replaced or cleared. */
@@ -238,42 +299,95 @@ export function buildPatch(
     patch['mqtt.tls'] = draft.tls;
   }
 
-  // Secrets: a pending clear wins over a draft, and a clear is `null` — never
-  // `""`, which the backend rejects.
-  if (draft.clearToken) {
-    patch['ha.token'] = null;
-  } else if (draft.token !== '') {
-    patch['ha.token'] = draft.token;
+  // A clear is `null` — never `""`, which the backend rejects.
+  switch (secretIntent(draft.token, draft.clearToken)) {
+    case 'replace':
+      patch['ha.token'] = draft.token;
+      break;
+    case 'clear':
+      patch['ha.token'] = null;
+      break;
+    case 'none':
+      break;
   }
-  if (draft.clearPassword) {
-    patch['mqtt.password'] = null;
-  } else if (draft.password !== '') {
-    patch['mqtt.password'] = draft.password;
+  switch (secretIntent(draft.password, draft.clearPassword)) {
+    case 'replace':
+      patch['mqtt.password'] = draft.password;
+      break;
+    case 'clear':
+      patch['mqtt.password'] = null;
+      break;
+    case 'none':
+      break;
   }
 
   return patch;
 }
 
-/** The token hint: a pending clear wins over "stored" wins over "nothing stored". */
-export function tokenHint(draft: ConnectionDraft, reader: SettingsReader): string {
-  if (draft.clearToken) {
-    return 'The stored token will be cleared when you save.';
+/** The diff PATCH narrowed to one group's keys; still only the changed keys. */
+export function groupPatch(
+  draft: ConnectionDraft,
+  reader: SettingsReader,
+  group: ConnectionGroup
+): Record<string, unknown> {
+  const changed = buildPatch(draft, reader);
+  const patch: Record<string, unknown> = {};
+  for (const key of GROUP_KEYS[group]) {
+    if (Object.prototype.hasOwnProperty.call(changed, key)) {
+      patch[key] = changed[key];
+    }
   }
-  if (reader.hasSecret('ha.token')) {
-    return 'A token is stored. Type a new one to replace it.';
-  }
-  return 'No token stored.';
+  return patch;
 }
 
-/** The password hint, in the same order of precedence. */
+/** What one secret field is asking for: the newest explicit intent wins. */
+export type SecretIntent = 'replace' | 'clear' | 'none';
+
+/**
+ * Resolve one secret field's intent, once, for both the patch and the hint.
+ *
+ * A typed value wins over a pending clear. That is the whole defect this ticket
+ * exists for: "Clear stored token" leaves `clearToken` set until a save resets
+ * it, and the old precedence let that stale flag beat the token the user pasted
+ * afterwards — the save sent `ha.token: null` and threw the paste away, while
+ * the hint still said the token "will be cleared". The newest explicit action
+ * is the one the user means, so a typed value replaces and an empty field with
+ * a pending clear clears. Both `buildPatch` and the hint branch on this, which
+ * is why they cannot disagree.
+ */
+export function secretIntent(typed: string, cleared: boolean): SecretIntent {
+  if (typed !== '') {
+    return 'replace';
+  }
+  return cleared ? 'clear' : 'none';
+}
+
+/** The token hint: the newest explicit intent wins over "stored" and "nothing stored". */
+export function tokenHint(draft: ConnectionDraft, reader: SettingsReader): string {
+  switch (secretIntent(draft.token, draft.clearToken)) {
+    case 'replace':
+      return 'The token you typed will replace the stored one when you save.';
+    case 'clear':
+      return 'The stored token will be cleared when you save.';
+    case 'none':
+      return reader.hasSecret('ha.token')
+        ? 'A token is stored. Type a new one to replace it.'
+        : 'No token stored.';
+  }
+}
+
+/** The password hint, by the same rule as the token's. */
 export function passwordHint(draft: ConnectionDraft, reader: SettingsReader): string {
-  if (draft.clearPassword) {
-    return 'The stored password will be cleared when you save.';
+  switch (secretIntent(draft.password, draft.clearPassword)) {
+    case 'replace':
+      return 'The password you typed will replace the stored one when you save.';
+    case 'clear':
+      return 'The stored password will be cleared when you save.';
+    case 'none':
+      return reader.hasSecret('mqtt.password')
+        ? 'A password is stored. Type a new one to replace it.'
+        : 'No password stored.';
   }
-  if (reader.hasSecret('mqtt.password')) {
-    return 'A password is stored. Type a new one to replace it.';
-  }
-  return 'No password stored.';
 }
 
 /**
@@ -330,14 +444,25 @@ export function requestFailure(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback;
 }
 
+/** The credentials a Test press may probe without saving them. */
+export interface HaTestCandidate {
+  baseUrl?: string;
+  token?: string;
+}
+
 /**
  * Run the Home Assistant test and never throw: a broken request becomes the
  * same `ok: false` shape a failed probe answers with, so a screen renders one
  * result and never has to invent a second failure path.
+ *
+ * A candidate is probed for that one request and never stored, so the panel can
+ * answer "do these credentials work?" before its save. Only the supplied,
+ * non-empty fields are sent: an empty field means "use the stored value", which
+ * is what a browser must mean because it never receives a stored secret.
  */
-export async function runHaTest(): Promise<HaTestResponse> {
+export async function runHaTest(candidate?: HaTestCandidate): Promise<HaTestResponse> {
   try {
-    return await testHa();
+    return await testHa(haCandidateBody(candidate));
   } catch (cause) {
     return {
       ok: false,
@@ -346,6 +471,23 @@ export async function runHaTest(): Promise<HaTestResponse> {
       error: requestFailure(cause, 'the Home Assistant test could not be run')
     };
   }
+}
+
+/** The wire body for a candidate, or undefined when it supplies nothing to test. */
+function haCandidateBody(
+  candidate?: HaTestCandidate
+): { base_url?: string; token?: string } | undefined {
+  if (candidate === undefined) {
+    return undefined;
+  }
+  const body: { base_url?: string; token?: string } = {};
+  if (candidate.baseUrl !== undefined && candidate.baseUrl !== '') {
+    body.base_url = candidate.baseUrl;
+  }
+  if (candidate.token !== undefined && candidate.token !== '') {
+    body.token = candidate.token;
+  }
+  return Object.keys(body).length > 0 ? body : undefined;
 }
 
 /** Run the MQTT test and never throw, for the same reason as `runHaTest`. */

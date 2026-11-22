@@ -76,6 +76,7 @@ __all__ = [
     "PROBE_TIMEOUT_S",
     "AudioProbeResult",
     "ConnectionProbes",
+    "HaProbeCandidate",
     "HaProbeResult",
     "LiveProbes",
     "MqttProbeResult",
@@ -136,6 +137,18 @@ _MUTE_ON: Final = (
 
 
 @dataclass(frozen=True, slots=True)
+class HaProbeCandidate:
+    """Credentials to probe once, without saving them.
+
+    A blank or missing field means "use the stored value", because the browser
+    never receives a stored secret and so cannot resend one.
+    """
+
+    base_url: str | None = None
+    token: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HaProbeResult:
     """Outcome of a Home Assistant connection test."""
 
@@ -180,7 +193,7 @@ class AudioProbeResult:
 class ConnectionProbes(Protocol):
     """The three connection tests the settings page offers."""
 
-    async def test_ha(self) -> HaProbeResult:
+    async def test_ha(self, candidate: HaProbeCandidate | None = None) -> HaProbeResult:
         """Check the configured Home Assistant instance."""
         ...
 
@@ -191,6 +204,14 @@ class ConnectionProbes(Protocol):
     async def test_audio(self) -> AudioProbeResult:
         """Check the configured audio output device."""
         ...
+
+
+def _supplied(value: str | None) -> str | None:
+    """Return a probe candidate's field when it supplies a non-blank value.
+
+    :param value: the candidate field, or ``None`` when the request omitted it.
+    """
+    return value if value is not None and value.strip() != "" else None
 
 
 def _refused_text(settings: MqttSettings) -> str:
@@ -453,14 +474,30 @@ class LiveProbes:
     mqtt_timeout_s: float = MQTT_PROBE_TIMEOUT_S
     clock: Callable[[], float] = time.monotonic
 
-    async def test_ha(self) -> HaProbeResult:
-        """Report whether Home Assistant is configured, then its live entity count."""
-        base_url = await self.store.get_setting("ha.base_url")
-        has_url = isinstance(base_url, str) and base_url.strip() != ""
-        if not has_url or not await self.store.has_secret("ha.token"):
+    async def test_ha(self, candidate: HaProbeCandidate | None = None) -> HaProbeResult:
+        """Report whether Home Assistant is configured, then its live entity count.
+
+        A *candidate* carries credentials to try once without saving them: a
+        settings form with unsaved typing needs an answer about what is on
+        screen, not about what is stored. Each field is resolved here, before the
+        client exists, and never written back. A blank candidate field falls back
+        to the stored value, because the browser never receives a stored secret
+        and so cannot resend one.
+        """
+        stored_url = await self.store.get_setting("ha.base_url")
+        stored_token = await self.store.get_setting("ha.token")
+        base_url = _supplied(candidate.base_url if candidate is not None else None)
+        if base_url is None and isinstance(stored_url, str) and stored_url.strip() != "":
+            base_url = stored_url
+        token = _supplied(candidate.token if candidate is not None else None)
+        if token is None and isinstance(stored_token, str) and stored_token != "":
+            token = stored_token
+        if base_url is None or token is None:
             return HaProbeResult(ok=False, error=_HA_UNCONFIGURED)
         try:
-            async with await HomeAssistantClient.from_store(self.store, client=self.client) as ha:
+            async with HomeAssistantClient(
+                base_url=base_url, token=token, client=self.client
+            ) as ha:
                 states = await ha.states(timeout_s=HA_PROBE_TIMEOUT_S)
         except HaError as exc:
             return HaProbeResult(ok=False, error=str(exc))

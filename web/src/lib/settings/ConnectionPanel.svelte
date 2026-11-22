@@ -1,6 +1,9 @@
 <!--
-  Connection settings (design 05 §2.2): Home Assistant and MQTT in two cards
-  with one per-section save at the bottom.
+  Connection settings (design 05 §2.2): Home Assistant and MQTT in two cards,
+  each with one save action for its own field group. There is no competing
+  section-wide save, and each group's save button is also that group's dirty
+  indicator. The device name is committed with MQTT because discovery needs to
+  hear the renamed unit alongside the broker configuration.
 
   Every rule this panel applies comes from `connection-form.ts`, which the
   first-run wizard shares (HSD-vl7t): the registry defaults, the client-side
@@ -42,16 +45,18 @@
   import { toastStore } from '../ui/toast.svelte.js';
   import {
     DEFAULT_INSTANCE_ID,
-    buildPatch,
     baseUrlProblem,
-    draftDirty,
     draftFrom,
-    draftInvalid,
+    groupDirty,
+    groupInvalid,
+    groupPatch,
     haTestView,
     mqttTestView,
     passwordHint,
     portProblem,
     rebaseDraft,
+    rebaseHaFields,
+    rebaseMqttFields,
     requestFailure,
     runHaTest,
     runMqttTest,
@@ -66,11 +71,14 @@
   let draft = $state<ConnectionDraft>(draftFrom(settings));
 
   let initialised = $state(false);
-  let saving = $state(false);
-  let saveError = $state<string | null>(null);
+  let savingHa = $state(false);
+  let haSaveError = $state<string | null>(null);
+  let savingMqtt = $state(false);
+  let mqttSaveError = $state<string | null>(null);
 
   let haTesting = $state(false);
   let haResult = $state<HaTestResponse | null>(null);
+  let haTestUsedTypedToken = $state(false);
   let mqttTesting = $state(false);
   let mqttResult = $state<MqttTestResponse | null>(null);
   let republishing = $state(false);
@@ -78,8 +86,10 @@
 
   const baseUrlError = $derived(baseUrlProblem(draft));
   const portError = $derived(portProblem(draft));
-  const invalid = $derived(draftInvalid(draft));
-  const dirty = $derived(draftDirty(draft, settings));
+  const haInvalid = $derived(groupInvalid(draft, 'ha'));
+  const haDirty = $derived(groupDirty(draft, settings, 'ha'));
+  const mqttInvalid = $derived(groupInvalid(draft, 'mqtt'));
+  const mqttDirty = $derived(groupDirty(draft, settings, 'mqtt'));
 
   const tokenHintText = $derived(tokenHint(draft, settings));
   const passwordHintText = $derived(passwordHint(draft, settings));
@@ -102,20 +112,37 @@
     }
   });
 
-  async function save(): Promise<void> {
-    if (saving || invalid || !dirty) {
+  async function saveHa(): Promise<void> {
+    if (savingHa || haInvalid || !haDirty) {
       return;
     }
-    saving = true;
-    saveError = null;
-    const ok = await settings.save(buildPatch(draft, settings));
-    saving = false;
+    savingHa = true;
+    haSaveError = null;
+    const ok = await settings.save(groupPatch(draft, settings, 'ha'));
+    savingHa = false;
     if (ok) {
-      draft = draftFrom(settings); // the echo is the new baseline
-      toastStore.push('success', 'Connection settings saved.');
+      draft = rebaseHaFields(draft, settings);
+      toastStore.push('success', 'Home Assistant settings saved.');
     } else {
-      saveError = settings.error ?? 'the settings could not be saved';
-      toastStore.push('error', saveError);
+      haSaveError = settings.error ?? 'the settings could not be saved';
+      toastStore.push('error', `Home Assistant settings: ${haSaveError}`);
+    }
+  }
+
+  async function saveMqtt(): Promise<void> {
+    if (savingMqtt || mqttInvalid || !mqttDirty) {
+      return;
+    }
+    savingMqtt = true;
+    mqttSaveError = null;
+    const ok = await settings.save(groupPatch(draft, settings, 'mqtt'));
+    savingMqtt = false;
+    if (ok) {
+      draft = rebaseMqttFields(draft, settings);
+      toastStore.push('success', 'MQTT settings and the device name saved.');
+    } else {
+      mqttSaveError = settings.error ?? 'the settings could not be saved';
+      toastStore.push('error', `MQTT settings and the device name: ${mqttSaveError}`);
     }
   }
 
@@ -141,7 +168,12 @@
     }
     haTesting = true;
     haResult = null;
-    haResult = await runHaTest();
+    haTestUsedTypedToken = draft.token !== '';
+    if (baseUrlProblem(draft) !== undefined) {
+      haTesting = false;
+      return;
+    }
+    haResult = await runHaTest({ baseUrl: draft.baseUrl, token: draft.token });
     haTesting = false;
   }
 
@@ -248,6 +280,26 @@
     </div>
 
     <ConnectionTestResult view={haView} />
+    {#if haResult !== null}
+      <p class="facts" aria-live="polite">
+        {#if haTestUsedTypedToken}
+          This tested the token you typed; it was not saved.
+        {:else}
+          No token was typed for this test, so it used the stored token if one is saved. Type one
+          above to test a different token.
+        {/if}
+      </p>
+    {/if}
+
+    <SectionFooter
+      label="Save Home Assistant settings"
+      describe="Home Assistant settings"
+      dirty={haDirty}
+      invalid={haInvalid}
+      saving={savingHa}
+      error={haSaveError}
+      onsave={saveHa}
+    />
   </Card>
 
   <Card title="MQTT">
@@ -256,6 +308,7 @@
       bind:value={draft.deviceName}
       hint="The name this unit appears as in Home Assistant, and the browser title."
     />
+    <p class="facts">Saving this group also renames the unit in Home Assistant discovery.</p>
 
     <MqttConnectionFields
       bind:host={draft.host}
@@ -314,9 +367,17 @@
         {/if}
       {/if}
     </div>
-  </Card>
 
-  <SectionFooter {dirty} {invalid} {saving} error={saveError} onsave={save} />
+    <SectionFooter
+      label="Save MQTT and device name"
+      describe="MQTT and device name settings"
+      dirty={mqttDirty}
+      invalid={mqttInvalid}
+      saving={savingMqtt}
+      error={mqttSaveError}
+      onsave={saveMqtt}
+    />
+  </Card>
 </div>
 
 <style>

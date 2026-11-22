@@ -20,9 +20,16 @@ import {
   buildPatch,
   draftDirty,
   draftFrom,
+  groupDirty,
+  groupInvalid,
+  groupPatch,
   haTestView,
   mqttTestView,
+  passwordHint,
   rebaseDraft,
+  rebaseHaFields,
+  rebaseMqttFields,
+  tokenHint,
   type SettingsReader
 } from './connection-form.js';
 
@@ -215,6 +222,140 @@ describe('mqttTestView', () => {
 
   it('passes null through untouched', () => {
     expect(mqttTestView(null)).toBeNull();
+  });
+});
+
+describe('the newest explicit secret intent wins', () => {
+  const storedToken = readerOf({ 'ha.token': true });
+  const storedPassword = readerOf({ 'mqtt.password': true });
+
+  it('sends the typed token when a clear is also pending', () => {
+    // The regression: "Clear stored token" leaves the flag set until a save,
+    // and the stale flag used to beat the value pasted afterwards.
+    const draft = { ...blankDraft(), token: 'fresh', clearToken: true };
+
+    expect(buildPatch(draft, storedToken)).toEqual({ 'ha.token': 'fresh' });
+  });
+
+  it('still sends null for a pending clear with an empty field', () => {
+    const draft = { ...blankDraft(), token: '', clearToken: true };
+
+    expect(buildPatch(draft, storedToken)).toEqual({ 'ha.token': null });
+  });
+
+  it('sends the typed password when a clear is also pending', () => {
+    const draft = { ...blankDraft(), password: 'fresh', clearPassword: true };
+
+    expect(buildPatch(draft, storedPassword)).toEqual({ 'mqtt.password': 'fresh' });
+  });
+
+  it('still sends null for a pending password clear with an empty field', () => {
+    const draft = { ...blankDraft(), password: '', clearPassword: true };
+
+    expect(buildPatch(draft, storedPassword)).toEqual({ 'mqtt.password': null });
+  });
+
+  it('words the token hint from the same intent, and never renders the value', () => {
+    const typed = 'SENTINEL-TYPED-TOKEN';
+    const hint = tokenHint({ ...blankDraft(), token: typed, clearToken: true }, storedToken);
+
+    expect(hint).toBe('The token you typed will replace the stored one when you save.');
+    expect(hint).not.toContain(typed);
+    expect(
+      tokenHint({ ...blankDraft(), token: '', clearToken: true }, storedToken)
+    ).toBe('The stored token will be cleared when you save.');
+    expect(tokenHint(blankDraft(), storedToken)).toBe(
+      'A token is stored. Type a new one to replace it.'
+    );
+    expect(tokenHint(blankDraft(), readerOf({}))).toBe('No token stored.');
+  });
+
+  it('words the password hint from the same intent, and never renders the value', () => {
+    const typed = 'SENTINEL-TYPED-PASSWORD';
+    const hint = passwordHint(
+      { ...blankDraft(), password: typed, clearPassword: true },
+      storedPassword
+    );
+
+    expect(hint).toBe('The password you typed will replace the stored one when you save.');
+    expect(hint).not.toContain(typed);
+    expect(
+      passwordHint({ ...blankDraft(), password: '', clearPassword: true }, storedPassword)
+    ).toBe('The stored password will be cleared when you save.');
+    expect(passwordHint(blankDraft(), storedPassword)).toBe(
+      'A password is stored. Type a new one to replace it.'
+    );
+    expect(passwordHint(blankDraft(), readerOf({}))).toBe('No password stored.');
+  });
+});
+
+describe('the per-group save rules', () => {
+  it('emits only its group keys, and buildPatch is the union of the two groups', () => {
+    const reader = readerOf({
+      'ha.base_url': 'http://stored-ha.example:8123',
+      'mqtt.host': 'stored-broker.example'
+    });
+    const draft = {
+      ...blankDraft(),
+      baseUrl: 'http://typed-ha.example:8123',
+      host: 'typed-broker.example'
+    };
+
+    const ha = groupPatch(draft, reader, 'ha');
+    const mqtt = groupPatch(draft, reader, 'mqtt');
+
+    expect(ha).toEqual({ 'ha.base_url': 'http://typed-ha.example:8123' });
+    expect(mqtt).toEqual({ 'mqtt.host': 'typed-broker.example' });
+    expect(buildPatch(draft, reader)).toEqual({ ...ha, ...mqtt });
+  });
+
+  it('keeps a bad MQTT port out of the Home Assistant group', () => {
+    const reader = readerOf({ 'mqtt.port': 1883 });
+    const draft = { ...blankDraft(), port: '0' };
+
+    expect(groupDirty(draft, reader, 'mqtt')).toBe(true);
+    expect(groupInvalid(draft, 'mqtt')).toBe(true);
+    expect(groupDirty(draft, reader, 'ha')).toBe(false);
+    expect(groupInvalid(draft, 'ha')).toBe(false);
+    expect(draftDirty(draft, reader)).toBe(true);
+  });
+});
+
+describe('the per-group rebase', () => {
+  it('rebaseHaFields leaves MQTT typing untouched and never adopts a secret', () => {
+    const reader = readerOf({
+      'ha.base_url': 'http://echo-ha.example:8123',
+      'ha.token': 'SENTINEL-STORED-TOKEN',
+      'mqtt.host': 'stored-broker.example'
+    });
+    const draft = { ...blankDraft(), host: 'typed-broker.example' };
+
+    const rebased = rebaseHaFields(draft, reader);
+
+    expect(rebased.baseUrl).toBe('http://echo-ha.example:8123');
+    expect(rebased.host).toBe('typed-broker.example');
+    expect(rebased.token).toBe('');
+  });
+
+  it('rebaseMqttFields leaves Home Assistant typing untouched and never adopts a secret', () => {
+    const reader = readerOf({
+      'ha.base_url': 'http://stored-ha.example:8123',
+      'ha.token': 'SENTINEL-STORED-TOKEN',
+      'mqtt.host': 'echo-broker.example'
+    });
+    const draft = {
+      ...blankDraft(),
+      baseUrl: 'http://typed-ha.example:8123',
+      token: 'typed-token',
+      password: 'typed-password'
+    };
+
+    const rebased = rebaseMqttFields(draft, reader);
+
+    expect(rebased.baseUrl).toBe('http://typed-ha.example:8123');
+    expect(rebased.token).toBe('typed-token');
+    expect(rebased.password).toBe('typed-password');
+    expect(rebased.host).toBe('echo-broker.example');
   });
 });
 

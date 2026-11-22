@@ -15,6 +15,7 @@ is HSD-8qf2.
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import ssl
 import threading
@@ -36,6 +37,7 @@ from chime_deck.api import (
     PROBE_TIMEOUT_S,
     AudioProbeResult,
     ConnectionProbes,
+    HaProbeCandidate,
     HaProbeResult,
     LiveProbes,
     MqttProbeResult,
@@ -290,6 +292,7 @@ class _FakeProbes:
         self._error = error
         self._hang = hang
         self._cancelled = cancelled
+        self.ha_candidates: list[HaProbeCandidate | None] = []
 
     async def _wait(self) -> None:
         """Block forever when *hang* is configured, recording the cancellation."""
@@ -306,8 +309,9 @@ class _FakeProbes:
         if self._error is not None:
             raise RuntimeError(self._error)
 
-    async def test_ha(self) -> HaProbeResult:
+    async def test_ha(self, candidate: HaProbeCandidate | None = None) -> HaProbeResult:
         """Return the configured Home Assistant result."""
+        self.ha_candidates.append(candidate)
         self._raise_if_configured()
         await self._wait()
         return self._ha if self._ha is not None else HaProbeResult(ok=False)
@@ -574,6 +578,146 @@ async def test_a_rejected_token_is_a_failure_without_the_secret(tmp_path: Path) 
     error = cast(str, body["error"])
     assert "ha.token" in error
     assert HA_TOKEN not in response.text
+
+
+async def test_a_candidate_pair_is_probed_instead_of_the_stored_pair(tmp_path: Path) -> None:
+    """Unsaved credentials reach the probe, and the store is left untouched.
+
+    The candidate names a different host and a different token; the recorded
+    request proves which pair the probe actually used, and the stored rows prove
+    the probe wrote nothing back.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    states = [{"entity_id": "light.kitchen", "state": "on", "attributes": {}}]
+    handler = Scripted({("GET", "/api/states"): _replies(lambda: _json(states))})
+    raw = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app, state = _build_app(tmp_path, ha_client=raw)
+    candidate_url = "http://candidate-ha.test:8123"
+    candidate_token = "candidate-token-0123456789"
+    try:
+        async with _running(app) as client:
+            await state.store.set_setting("ha.base_url", BASE_URL)
+            await state.store.set_setting("ha.token", HA_TOKEN)
+            response = await client.post(
+                "/api/settings/test/ha",
+                json={"base_url": candidate_url, "token": candidate_token},
+            )
+            stored_url = await state.store.get_setting("ha.base_url")
+            stored_token = await state.store.get_setting("ha.token")
+    finally:
+        await raw.aclose()
+
+    body = cast("dict[str, object]", response.json())
+    assert body["ok"] is True
+    assert body["entity_count"] == 1
+    [request] = handler.requests
+    assert request.url.host == "candidate-ha.test"
+    assert request.headers["authorization"] == f"Bearer {candidate_token}"
+    assert stored_url == BASE_URL
+    assert stored_token == HA_TOKEN
+
+
+async def test_a_candidate_token_keeps_the_stored_base_url(tmp_path: Path) -> None:
+    """A candidate field that is absent falls back to the stored value.
+
+    The settings form can test a pasted token without retyping the address; the
+    address it cannot see is the one already saved.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    states = [{"entity_id": "light.kitchen", "state": "on", "attributes": {}}]
+    handler = Scripted({("GET", "/api/states"): _replies(lambda: _json(states))})
+    raw = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app, state = _build_app(tmp_path, ha_client=raw)
+    candidate_token = "candidate-token-fedcba"
+    try:
+        async with _running(app) as client:
+            await state.store.set_setting("ha.base_url", BASE_URL)
+            await state.store.set_setting("ha.token", HA_TOKEN)
+            response = await client.post("/api/settings/test/ha", json={"token": candidate_token})
+    finally:
+        await raw.aclose()
+
+    body = cast("dict[str, object]", response.json())
+    assert body["ok"] is True
+    [request] = handler.requests
+    assert request.url.host == "ha.test"
+    assert request.headers["authorization"] == f"Bearer {candidate_token}"
+
+
+async def test_a_candidate_token_never_round_trips(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The probe never echoes the credentials it was asked to try.
+
+    The token is deliberately never stored, so the scrubber cannot know it: if
+    it appeared in the response or a log record it would appear verbatim.
+
+    :param tmp_path: pytest temporary directory.
+    :param caplog: captured log records.
+    """
+    caplog.set_level(logging.DEBUG)
+    states = [{"entity_id": "light.kitchen", "state": "on", "attributes": {}}]
+    handler = Scripted({("GET", "/api/states"): _replies(lambda: _json(states))})
+    raw = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app, state = _build_app(tmp_path, ha_client=raw)
+    candidate_token = "candidate-token-SENTINEL-7f3a"
+    try:
+        async with _running(app) as client:
+            await state.store.set_setting("ha.base_url", BASE_URL)
+            await state.store.set_setting("ha.token", HA_TOKEN)
+            response = await client.post("/api/settings/test/ha", json={"token": candidate_token})
+    finally:
+        await raw.aclose()
+
+    body = cast("dict[str, object]", response.json())
+    assert body["ok"] is True
+    assert candidate_token not in response.text
+    assert candidate_token not in caplog.text
+
+
+async def test_a_bad_candidate_token_wins_over_a_good_stored_one(tmp_path: Path) -> None:
+    """The candidate is what was probed: a bad paste fails even when the store is good.
+
+    The fake answers only the stored token, so a passing request would prove the
+    stored pair had been used. The failing candidate followed by a passing
+    no-body request is the positive control for both halves.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    states = [{"entity_id": "light.kitchen", "state": "on", "attributes": {}}]
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """Answer 200 only for the stored token, remembering every attempt.
+
+        :param request: the state request the probe made.
+        """
+        seen.append(request.headers.get("authorization", ""))
+        if request.headers.get("authorization") == f"Bearer {HA_TOKEN}":
+            return _json(states)
+        return httpx.Response(401, text="unauthorized")
+
+    raw = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app, state = _build_app(tmp_path, ha_client=raw)
+    bad_token = "wrong-candidate-token"
+    try:
+        async with _running(app) as client:
+            await state.store.set_setting("ha.base_url", BASE_URL)
+            await state.store.set_setting("ha.token", HA_TOKEN)
+            candidate = await client.post("/api/settings/test/ha", json={"token": bad_token})
+            stored = await client.post("/api/settings/test/ha")
+    finally:
+        await raw.aclose()
+
+    candidate_body = cast("dict[str, object]", candidate.json())
+    assert candidate_body["ok"] is False
+    assert "ha.token" in cast(str, candidate_body["error"])
+    assert bad_token not in candidate.text
+    stored_body = cast("dict[str, object]", stored.json())
+    assert stored_body["ok"] is True
+    assert seen == [f"Bearer {bad_token}", f"Bearer {HA_TOKEN}"]
 
 
 async def test_an_unreachable_home_assistant_is_reported(tmp_path: Path) -> None:

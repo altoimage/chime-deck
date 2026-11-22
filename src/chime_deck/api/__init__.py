@@ -102,6 +102,7 @@ from .probes import (
     PROBE_TIMEOUT_S,
     AudioProbeResult,
     ConnectionProbes,
+    HaProbeCandidate,
     HaProbeResult,
     LiveProbes,
     MqttProbeResult,
@@ -109,6 +110,7 @@ from .probes import (
 from .render import PRESERVED_ORTHOGRAPHIC_CONTROLS, build_render_router
 from .settings import (
     AudioTestResponse,
+    HaTestRequest,
     HaTestResponse,
     MqttTestResponse,
     SettingsResponse,
@@ -182,7 +184,9 @@ __all__ = [
     "ErrorEnvelope",
     "FromUrlRequest",
     "FromUrlResponse",
+    "HaProbeCandidate",
     "HaProbeResult",
+    "HaTestRequest",
     "HaTestResponse",
     "HaTtsEngineResponse",
     "HaTtsEnginesResponse",

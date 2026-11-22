@@ -60,6 +60,8 @@
     mqttTestView,
     passwordHint,
     portProblem,
+    rebaseHaFields,
+    rebaseMqttFields,
     runHaTest,
     runMqttTest,
     tokenHint,
@@ -217,28 +219,25 @@
     return patch;
   }
 
-  /** Rebase step 1 on the echo, leaving step 2's unsaved typing untouched. */
+  /**
+   * Rebase step 1 on the echo, leaving step 2's unsaved typing untouched.
+   *
+   * The rule itself lives in `connection-form.ts`, so the panel and the wizard
+   * cannot disagree about what a Home Assistant save replaces.
+   */
   function rebaseHa(): void {
-    const fresh = draftFrom(settings);
-    draft.baseUrl = fresh.baseUrl;
-    draft.token = fresh.token;
-    draft.clearToken = fresh.clearToken;
+    draft = rebaseHaFields(draft, settings);
   }
 
   /**
    * Rebase step 2 on the echo, for the same reason as `rebaseHa`.
    *
-   * The username and a pending clear are adopted from the echo; the password
-   * is never touched, because the server never returns it — the only value the
-   * field can hold is the one the user typed.
+   * The shared rule adopts the echo's keys and never the password, because the
+   * server never returns it — the only value the field can hold is the one the
+   * user typed.
    */
   function rebaseMqtt(): void {
-    const fresh = draftFrom(settings);
-    draft.host = fresh.host;
-    draft.port = fresh.port;
-    draft.username = fresh.username;
-    draft.tls = fresh.tls;
-    draft.clearPassword = fresh.clearPassword;
+    draft = rebaseMqttFields(draft, settings);
   }
 
   function markTokenCleared(): void {

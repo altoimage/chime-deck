@@ -44,9 +44,22 @@ function isSettingsPatch(response: Response): boolean {
   return response.url().endsWith('/api/settings') && response.request().method() === 'PATCH';
 }
 
-/** The one section footer's Save button — `exact` keeps the footer's aria-label out. */
+/**
+ * The one section footer's Save button, for the panels that still have a single
+ * anonymous save (Audio, the entity editor) — `exact` keeps the footer's
+ * aria-label out.
+ *
+ * Not the Connection panel: cd-ev3m replaced that section's one footer with a
+ * save per field group, each labelled with what it commits, so a bare `Save` no
+ * longer exists there. Its Home Assistant group uses `haSaveButton`.
+ */
 function saveButton(page: Page) {
   return page.getByRole('button', { name: 'Save', exact: true });
+}
+
+/** The Connection panel's Home Assistant group save, named by cd-ev3m. */
+function haSaveButton(page: Page) {
+  return page.getByRole('button', { name: 'Save Home Assistant settings', exact: true });
 }
 
 /** The Speech panel's own footer button, same rule as `saveButton`. */
@@ -72,7 +85,7 @@ test('the Connection panel saves the Home Assistant URL through the real PATCH',
   // Armed before the click: the response may arrive before the click resolves.
   const patched = page.waitForResponse(isSettingsPatch);
   await url.fill(NEW_HA_URL);
-  await saveButton(page).click();
+  await haSaveButton(page).click();
   const body = await patchBody(await patched);
 
   // (a) the echo of this save…
@@ -81,7 +94,7 @@ test('the Connection panel saves the Home Assistant URL through the real PATCH',
   await expect.poll(async () => (await readSettings(request)).settings['ha.base_url']).toBe(NEW_HA_URL);
   // (c) the UI took the echo as its baseline: the value stayed, the form is clean.
   await expect(url).toHaveValue(NEW_HA_URL);
-  await expect(saveButton(page)).toBeDisabled();
+  await expect(haSaveButton(page)).toBeDisabled();
 
   watch.assertAllLocal();
 });

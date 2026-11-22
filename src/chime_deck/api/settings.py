@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Annotated, Final
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from pydantic import BaseModel
 
 from ..config import SECRET_SCRUBBER, refresh_secret_scrubber
@@ -44,12 +44,14 @@ from ..store import (
     normalise_value,
 )
 from .errors import ApiError, ErrorCode
+from .probes import HaProbeCandidate
 
 if TYPE_CHECKING:
     from ..app import AppState
 
 __all__ = [
     "AudioTestResponse",
+    "HaTestRequest",
     "HaTestResponse",
     "MqttTestResponse",
     "SettingsResponse",
@@ -79,6 +81,18 @@ class SettingsResponse(BaseModel):
     secrets: dict[str, bool]
 
 
+class HaTestRequest(BaseModel):
+    """Credentials to try once, before they are saved.
+
+    The values are used for that one probe and are never written to the store or
+    echoed in the response. A blank or missing field means "use the stored
+    value", because the browser never receives a stored secret.
+    """
+
+    base_url: str | None = None
+    token: str | None = None
+
+
 class HaTestResponse(BaseModel):
     """Result of the Home Assistant connection test."""
 
@@ -105,6 +119,14 @@ class AudioTestResponse(BaseModel):
     device: str | None = None
     latency_ms: float | None = None
     error: str | None = None
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """Treat a blank request field as "use the stored value".
+
+    :param value: a field from :class:`HaTestRequest`, or ``None``.
+    """
+    return None if value is None or value.strip() == "" else value
 
 
 def _scrub(value: str | None) -> str | None:
@@ -268,11 +290,21 @@ def build_settings_router(state: AppState) -> APIRouter:
         return _TIMEOUT_TEXT.format(label=label, seconds=state.probe_timeout)
 
     @router.post("/test/ha")
-    async def test_ha() -> HaTestResponse:
-        """Test the Home Assistant connection; ``ok`` carries the verdict."""
+    async def test_ha(body: Annotated[HaTestRequest | None, Body()] = None) -> HaTestResponse:
+        """Test the Home Assistant connection; ``ok`` carries the verdict.
+
+        The body is optional: with none, the stored settings are tested exactly
+        as they always were. When the settings form has unsaved typing it sends
+        a candidate, which is probed once and discarded — never written, never
+        echoed.
+        """
+        candidate = HaProbeCandidate(
+            base_url=_blank_to_none(body.base_url) if body is not None else None,
+            token=_blank_to_none(body.token) if body is not None else None,
+        )
         try:
             async with asyncio.timeout(state.probe_timeout):
-                result = await state.probes.test_ha()
+                result = await state.probes.test_ha(candidate)
         except TimeoutError:
             return HaTestResponse(ok=False, error=_timeout_response("Home Assistant"))
         except Exception as exc:

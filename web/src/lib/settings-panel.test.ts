@@ -256,14 +256,14 @@ describe('2. secret diffs', () => {
     // 2a — a replaced secret contributes its new value.
     let backend = await freshPanel({ secrets: { 'ha.token': true } });
     type(inputByLabel('Long-lived token'), 'new-token-value');
-    buttonByText('Save').click();
+    buttonByText('Save Home Assistant settings').click();
     await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
     expect(patchBody(patches(backend.calls)[0])).toEqual({ 'ha.token': 'new-token-value' });
 
     // 2b — an untouched secret contributes NO key.
     backend = await freshPanel({ secrets: { 'ha.token': true } });
     type(inputByLabel('Broker host'), 'broker.local');
-    buttonByText('Save').click();
+    buttonByText('Save MQTT and device name').click();
     await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
     const untouched = patchBody(patches(backend.calls)[0]);
     expect(untouched).toEqual({ 'mqtt.host': 'broker.local' });
@@ -274,7 +274,7 @@ describe('2. secret diffs', () => {
     expect(buttonByText('Clear stored token')).toBeTruthy();
     buttonByText('Clear stored token').click();
     flushSync();
-    buttonByText('Save').click();
+    buttonByText('Save Home Assistant settings').click();
     await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
     const cleared = patchBody(patches(backend.calls)[0]);
     expect(cleared).toEqual({ 'ha.token': null });
@@ -372,7 +372,7 @@ describe('6. per-section save', () => {
     type(inputByLabel('Broker host'), 'new-broker.local');
     mustFind<HTMLButtonElement>('button[role="switch"]').click();
     flushSync();
-    buttonByText('Save').click();
+    buttonByText('Save MQTT and device name').click();
 
     await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
     const body = patchBody(patches(backend.calls)[0]);
@@ -467,7 +467,7 @@ describe('8. invalid port', () => {
     type(inputByLabel('Broker port'), '0');
 
     expect(pageText()).toContain('the port must be a whole number between 1 and 65535');
-    const save = buttonByText('Save');
+    const save = buttonByText('Save MQTT and device name');
     expect(save.disabled).toBe(true);
 
     save.click();
@@ -540,7 +540,7 @@ describe('10. a late settings load', () => {
     expect(settings.loaded).toBe(false);
 
     type(inputByLabel('Home Assistant URL'), typedUrl);
-    expect(buttonByText('Save').disabled).toBe(false);
+    expect(buttonByText('Save Home Assistant settings').disabled).toBe(false);
 
     releaseLoad();
     await loading;
@@ -548,9 +548,9 @@ describe('10. a late settings load', () => {
 
     expect(inputByLabel('Home Assistant URL').value).toBe(typedUrl);
     expect(inputByLabel('Broker host').value).toBe('stored-broker.local');
-    expect(buttonByText('Save').disabled).toBe(false);
+    expect(buttonByText('Save Home Assistant settings').disabled).toBe(false);
 
-    buttonByText('Save').click();
+    buttonByText('Save Home Assistant settings').click();
     await vi.waitFor(() => expect(patches(calls)).toHaveLength(1));
     expect(patchBody(patches(calls)[0])).toEqual({ 'ha.base_url': typedUrl });
   });
@@ -571,7 +571,7 @@ describe('11. the MQTT card is the shared field group', () => {
 
     type(inputByLabel('Username'), 'doorbell');
     type(inputByLabel('Password'), 'broker-secret');
-    buttonByText('Save').click();
+    buttonByText('Save MQTT and device name').click();
 
     await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
     expect(patchBody(patches(backend.calls)[0])).toEqual({
@@ -639,8 +639,8 @@ describe('12. the device name and the pinned instance id', () => {
     expect(pageText()).toContain('This unit publishes as default');
 
     type(inputByLabel('Device name'), 'Hall Doorbell');
-    expect(buttonByText('Save').disabled).toBe(false);
-    buttonByText('Save').click();
+    expect(buttonByText('Save MQTT and device name').disabled).toBe(false);
+    buttonByText('Save MQTT and device name').click();
 
     await vi.waitFor(() => expect(patches(calls)).toHaveLength(1));
     expect(patchBody(patches(calls)[0])).toEqual({ 'device.name': 'Hall Doorbell' });
@@ -649,7 +649,7 @@ describe('12. the device name and the pinned instance id', () => {
     // Save must be impossible, so no spurious `mqtt.instance_id` PATCH follows.
     await vi.waitFor(() => expect(inputByLabel('Instance ID').value).toBe('hall-doorbell'));
     flushSync();
-    expect(buttonByText('Save').disabled).toBe(true);
+    expect(buttonByText('Save MQTT and device name').disabled).toBe(true);
     expect(patches(calls)).toHaveLength(1);
     expect(pageText()).toContain('This unit publishes as hall-doorbell');
   });
@@ -663,14 +663,75 @@ describe('12. the device name and the pinned instance id', () => {
     renderPanel();
 
     type(inputByLabel('Device name'), 'Kitchen');
-    buttonByText('Save').click();
+    buttonByText('Save MQTT and device name').click();
 
     await vi.waitFor(() => expect(patches(calls)).toHaveLength(1));
     expect(patchBody(patches(calls)[0])).toEqual({ 'device.name': 'Kitchen' });
 
     // Clean again: the rename is the only key sent and the pinned id survived it.
-    await vi.waitFor(() => expect(buttonByText('Save').disabled).toBe(true));
+    await vi.waitFor(() => expect(buttonByText('Save MQTT and device name').disabled).toBe(true));
     expect(inputByLabel('Device name').value).toBe('Kitchen');
     expect(inputByLabel('Instance ID').value).toBe('hall-doorbell');
+  });
+});
+
+/* ---- 13. the Connection panel's two independent saves (cd-ev3m) ---------- */
+
+describe('13. per-group saves', () => {
+  it('saves one group at a time and leaves the other group typing intact', async () => {
+    const backend = fakeBackend({
+      settings: { 'ha.base_url': 'http://ha.local:8123', 'mqtt.host': 'old-broker.local' }
+    });
+    await settings.load();
+    renderPanel();
+
+    type(inputByLabel('Long-lived token'), 'pasted-token');
+    type(inputByLabel('Broker host'), 'new-broker.local');
+    buttonByText('Save MQTT and device name').click();
+
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+    expect(patchBody(patches(backend.calls)[0])).toEqual({ 'mqtt.host': 'new-broker.local' });
+    expect(inputByLabel('Long-lived token').value).toBe('pasted-token');
+
+    buttonByText('Save Home Assistant settings').click();
+
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(2));
+    expect(patchBody(patches(backend.calls)[1])).toEqual({ 'ha.token': 'pasted-token' });
+  });
+
+  it('lets a bad MQTT port block only the MQTT save', async () => {
+    const backend = fakeBackend({
+      settings: { 'mqtt.port': 1883, 'ha.base_url': 'http://ha.local:8123' }
+    });
+    await settings.load();
+    renderPanel();
+
+    type(inputByLabel('Home Assistant URL'), 'http://typed-ha.local:8123');
+    type(inputByLabel('Broker port'), '0');
+
+    expect(pageText()).toContain('the port must be a whole number between 1 and 65535');
+    expect(buttonByText('Save MQTT and device name').disabled).toBe(true);
+    expect(buttonByText('Save Home Assistant settings').disabled).toBe(false);
+
+    buttonByText('Save Home Assistant settings').click();
+
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+    expect(patchBody(patches(backend.calls)[0])).toEqual({
+      'ha.base_url': 'http://typed-ha.local:8123'
+    });
+  });
+
+  it('sends a typed token even when a clear is still pending', async () => {
+    const backend = fakeBackend({ secrets: { 'ha.token': true } });
+    await settings.load();
+    renderPanel();
+
+    buttonByText('Clear stored token').click();
+    flushSync();
+    type(inputByLabel('Long-lived token'), 'fresh-token');
+    buttonByText('Save Home Assistant settings').click();
+
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+    expect(patchBody(patches(backend.calls)[0])).toEqual({ 'ha.token': 'fresh-token' });
   });
 });

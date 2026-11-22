@@ -22,7 +22,16 @@ from fastapi import FastAPI
 from log_isolation import preserve_log_state
 from mqtt_fakes import FakeBroker
 
-from chime_deck.api import ConnectionProbes, ErrorCode, ErrorEnvelope, install_error_handlers
+from chime_deck.api import (
+    AudioProbeResult,
+    ConnectionProbes,
+    ErrorCode,
+    ErrorEnvelope,
+    HaProbeCandidate,
+    HaProbeResult,
+    MqttProbeResult,
+    install_error_handlers,
+)
 from chime_deck.app import AppState, create_app
 from chime_deck.config import REDACTED, SECRET_SCRUBBER, ServerConfig, install_log_scrubber
 from chime_deck.health import HealthStatus
@@ -1118,3 +1127,59 @@ async def test_dynamic_paid_and_http_provider_stay_ordinarily_writable(tmp_path:
         settings = cast("dict[str, object]", patched["settings"])
         assert settings["tts.allow_dynamic_paid"] is True
         assert settings["tts.http_tts.provider"] == "0123456789ab"
+
+
+class _RecordingHaProbes:
+    """Record the candidate each Home Assistant test received, and pass."""
+
+    def __init__(self) -> None:
+        """Start with no recorded requests."""
+        self.candidates: list[HaProbeCandidate | None] = []
+
+    async def test_ha(self, candidate: HaProbeCandidate | None = None) -> HaProbeResult:
+        """Record the candidate and answer a pass.
+
+        :param candidate: credentials the route asked the probe to try.
+        """
+        self.candidates.append(candidate)
+        return HaProbeResult(ok=True, entity_count=2)
+
+    async def test_mqtt(self) -> MqttProbeResult:
+        """Never used by this test."""
+        raise AssertionError("the MQTT probe must not run")
+
+    async def test_audio(self) -> AudioProbeResult:
+        """Never used by this test."""
+        raise AssertionError("the audio probe must not run")
+
+
+async def test_the_ha_test_body_is_optional_and_null_is_accepted(tmp_path: Path) -> None:
+    """``{}`` and a JSON ``null`` both test the stored settings.
+
+    The body is optional so a client that has nothing to add keeps sending no
+    body at all; an empty object is the same request, and a literal ``null`` is
+    the shape pydantic receives for a bodiless POST. All three must reach the
+    probe as \"use the stored values\".
+
+    :param tmp_path: pytest temporary directory.
+    """
+    probes = _RecordingHaProbes()
+    app, _state = _build_app(tmp_path, probes=probes)
+
+    async with _running(app) as client:
+        empty = await client.post("/api/settings/test/ha", json={})
+        null = await client.post(
+            "/api/settings/test/ha",
+            content=b"null",
+            headers={"content-type": "application/json"},
+        )
+
+    for response in (empty, null):
+        assert response.status_code == 200
+        body = cast("dict[str, object]", response.json())
+        assert body["ok"] is True
+        assert body["entity_count"] == 2
+    assert probes.candidates == [
+        HaProbeCandidate(base_url=None, token=None),
+        HaProbeCandidate(base_url=None, token=None),
+    ]

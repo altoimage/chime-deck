@@ -5,6 +5,11 @@
   interface Props {
     /** The primary action's label. */
     label?: string;
+    /**
+     * The section landmark's accessible name; distinguish multiple save footers
+     * on one page while keeping the shared default stable for existing panels.
+     */
+    describe?: string;
     /** Whether anything changed since the last save. */
     dirty: boolean;
     /** Whether a client-side rule currently blocks the save. */
@@ -16,7 +21,15 @@
     onsave: () => void;
   }
 
-  const { label = 'Save', dirty, invalid = false, saving, error = null, onsave }: Props = $props();
+  const {
+    label = 'Save',
+    describe = 'Save this section',
+    dirty,
+    invalid = false,
+    saving,
+    error = null,
+    onsave
+  }: Props = $props();
 </script>
 
 <!--
@@ -26,7 +39,7 @@
 
   The inline error is the durable record — a toast can be missed or dismissed.
 -->
-<section class="footer" aria-label="Save this section">
+<section class="footer" aria-label={describe}>
   {#if error}
     <p class="error" role="alert">
       <Icon name="mdi:alert-circle-outline" size={24} />

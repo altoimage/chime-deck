@@ -1922,9 +1922,23 @@ export function listAudioDevices(): Promise<AudioDevicesResponse> {
 /**
  * Test the stored Home Assistant connection. A failed test is `ok: false` at
  * HTTP 200, so only a broken request becomes an `ApiError`.
+ *
+ * A candidate is used for that ONE probe and never stored: the server writes
+ * nothing and the response never carries the values back. With no candidate the
+ * request has no body at all, so it tests exactly the stored settings.
  */
-export function testHa(): Promise<HaTestResponse> {
-  return request<HaTestResponse>('/api/settings/test/ha', { method: 'POST' });
+export function testHa(candidate?: {
+  base_url?: string;
+  token?: string;
+}): Promise<HaTestResponse> {
+  if (candidate === undefined) {
+    return request<HaTestResponse>('/api/settings/test/ha', { method: 'POST' });
+  }
+  return request<HaTestResponse>('/api/settings/test/ha', {
+    method: 'POST',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify(candidate)
+  });
 }
 
 /**

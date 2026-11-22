@@ -11,6 +11,18 @@ Because the bench passes a *factory* rather than a client instance, the app's
 lifespan owns every generation of that client and a committed
 ``ha.base_url``/``ha.token`` change rebuilds it in place, still offline.
 
+The Home Assistant **REST** edge is faked too, through an
+:class:`httpx.MockTransport` that is handed to :func:`~chime_deck.app.create_app`
+as ``ha_client``. That transport is the one the settings page's connection probe
+borrows, so without it ``POST /api/settings/test/ha`` on this bench could only
+ever answer "cannot connect to Home Assistant": there is no socket here and no
+name to resolve. The Test button is a user-facing control, and ticket cd-ev3m is
+about exactly that control — it must test the token the user typed rather than
+the stored one — so the tier has to be able to press it and read a real verdict.
+The fake is deliberately tiny: one ``/api/states`` answer guarded by the same
+bearer the scripted websocket peer accepts, a ``401`` for any other token and a
+``404`` for anything else. No socket, no DNS, no real Home Assistant.
+
 Nothing here is production code and nothing here may touch the repository: the
 data directory is a fixed per-port path under the system temp directory that is
 wiped before the bench opens it and removed on exit, the socket binds
@@ -60,7 +72,10 @@ own catch-all:
     the token with ``""`` / ``null``. The app's own settings subscriber rebuilds
     the websocket client in place (against the scripted peer factory, still
     offline), so a spec can watch a credential change take effect with no
-    restart. Exposed only on this outer wrapper, exactly like ``__test/token``.
+    restart. It also reports a ``token_fingerprint`` (a SHA-256 prefix) so a spec
+    can prove the stored row holds exactly the value it typed without any
+    response ever carrying the secret. Exposed only on this outer wrapper,
+    exactly like ``__test/token``.
 
 ``tests/`` is deliberately not a package, so the plain ``chime_fakes`` and
 ``ha_ws_fakes`` imports only work when the caller puts ``tests`` on
@@ -87,6 +102,7 @@ from functools import partial
 from pathlib import Path
 from typing import Final
 
+import httpx
 import uvicorn
 from chime_fakes import RecordingBackend, build_offline_wiring
 from ha_ws_fakes import FakeHaFactory, FakeHaPeer
@@ -146,6 +162,15 @@ was not handed here, so a drift between the seed and the allowlist would leave
 the bench with a client that can never authenticate.
 """
 
+TOKEN_FINGERPRINT_CHARS: Final = 12
+"""Hex characters of the ``ha.token`` SHA-256 that ``__test/ha_credentials`` reports.
+
+Twelve lowercase hex characters — 48 bits — are a fingerprint, not a secret: a
+spec can tell "the stored row really changed to the value I typed" from "the row
+still holds the old one" without the response ever being worth reading for an
+attacker. That ceiling is what lets this ticket's spec assert exact storage.
+"""
+
 CANONICAL_ENTITIES: Final = (
     ("lock.front_door", "Front Door", "mdi:lock"),
     ("sensor.hallway_temperature", "Hallway Temperature", "mdi:thermometer"),
@@ -196,6 +221,71 @@ _LOGGER = logging.getLogger("chime_deck.test_bench")
 
 DEFAULT_STATIC_DIR: Final = Path(__file__).resolve().parents[3] / "web" / "dist"
 """The committed build of the SPA, resolved from this file so the cwd is irrelevant."""
+
+
+def _ha_states_payload() -> list[dict[str, object]]:
+    """Return one ``/api/states`` object per seeded entity, in seed order.
+
+    Derived from :data:`INITIAL_STATES` rather than restated, so the count the
+    Test button reports is the number of tiles the seed actually holds: a second
+    copy of the six entity ids would drift the day one of them is renamed, and
+    the spec would then be asserting a number that means nothing.
+
+    :class:`~chime_deck.ha.HomeAssistantClient` reduces each entry with
+    ``_parse_state``, which requires a string ``entity_id`` and ``state`` and
+    copies ``attributes`` through as a mapping. The optional ``last_changed`` /
+    ``last_updated`` timestamps are omitted on purpose: the probe counts entries
+    and never reads them, and a fabricated clock reading is a lie a spec could
+    later trust.
+
+    :returns: JSON-ready state objects, in seed order.
+    """
+    return [
+        {"entity_id": entity_id, "state": values["s"], "attributes": values["a"]}
+        for entity_id, values in INITIAL_STATES.items()
+    ]
+
+
+def _ha_rest_handler(request: httpx.Request) -> httpx.Response:
+    """Answer the Home Assistant REST edge in memory, as far as the probe needs.
+
+    The bench had no REST fake at all, which left one user-facing control
+    unexercisable: ``POST /api/settings/test/ha`` could only report "cannot
+    connect" because nothing in this process may open a socket or resolve a
+    name. The Test button is what ticket cd-ev3m is about — it must probe the
+    token the user typed, not the stored one — so the bench answers the one
+    request that probe makes.
+
+    The allowlist is :data:`HA_TOKEN`, the same constant the scripted websocket
+    peer accepts, so the bench cannot disagree with itself about which credential
+    is current: a spec that seeds a stale token gets a ``401`` from both edges
+    and a save that stores :data:`HA_TOKEN` gets ``200`` from both.
+
+    Only ``GET /api/states`` is served. Everything else is a ``404`` with Home
+    Assistant's own shape, so a future probe that reads ``/api/config`` fails
+    loudly instead of silently getting an entity list.
+
+    :param request: the outgoing REST request the borrowed client produced.
+    :returns: the scripted answer; nothing here touches the network.
+    """
+    if request.method == "GET" and request.url.path == "/api/states":
+        if request.headers.get("Authorization") != f"Bearer {HA_TOKEN}":
+            return httpx.Response(401, json={"message": "401: Unauthorized"})
+        return httpx.Response(200, json=_ha_states_payload())
+    return httpx.Response(404, json={"message": "404: Not Found"})
+
+
+def _ha_rest_client() -> httpx.AsyncClient:
+    """Return the borrowed Home Assistant REST client the app and its probes share.
+
+    :class:`httpx.MockTransport` replaces the transport, so the client is real
+    httpx — same retry, timeout and status mapping as production — with every
+    connection answered in memory. The app never closes a borrowed client, so it
+    lives as long as this process.
+
+    :returns: an ``AsyncClient`` whose only transport is :func:`_ha_rest_handler`.
+    """
+    return httpx.AsyncClient(transport=httpx.MockTransport(_ha_rest_handler))
 
 
 def _attempts(timeout_s: float) -> int:
@@ -708,9 +798,19 @@ class TestBench:
         client the next request will meet: the old one is closed and a new one is
         built from the new settings, with no restart.
 
+        ``token_fingerprint`` is the first :data:`TOKEN_FINGERPRINT_CHARS`
+        lowercase hex characters of the SHA-256 of the stored ``ha.token``, and
+        ``null`` when no token is stored. A spec can then assert that the stored
+        row holds *exactly* the value it typed — the question this ticket is held
+        to, because the panel's own save path must carry the pasted token rather
+        than a pending clear — without any response ever carrying the secret. The
+        stored value is read with ``get_setting``, which is the same accessor the
+        websocket client uses to build its ``auth`` frame; nothing here logs it,
+        echoes it or puts it in a response.
+
         :param request: the incoming JSON request, ``{"base_url": "...",
-            "token": "..."}``; either key may be omitted, and a ``null`` or
-            ``""`` token clears it.
+            "token": "..."}``; either key may be omitted, an empty body is a pure
+            read, and a ``null`` or ``""`` token clears it.
         """
         payload = await request.json()
         if not isinstance(payload, Mapping):
@@ -727,11 +827,17 @@ class TestBench:
             await self._state.store.set_setting("ha.base_url", raw_base_url)
         if "token" in payload:
             await self._state.store.set_setting("ha.token", "" if raw_token is None else raw_token)
+        stored = await self._state.store.get_setting("ha.token")
+        fingerprint = None
+        if isinstance(stored, str) and stored != "":
+            digest = hashlib.sha256(stored.encode("utf-8")).hexdigest()
+            fingerprint = digest[:TOKEN_FINGERPRINT_CHARS]
         return JSONResponse(
             {
                 "base_url": await self._state.store.get_setting("ha.base_url"),
                 "token_stored": await self._state.store.has_secret("ha.token"),
                 "ha": self._state.health.get("ha").value,
+                "token_fingerprint": fingerprint,
             }
         )
 
@@ -823,6 +929,11 @@ async def _serve(port: int, static_dir: Path, data_dir: Path) -> None:
     doorbell = create_app(
         config,
         wiring=wiring,
+        # The settings page's Test button borrows this client, so the bench fakes
+        # the REST edge as well as the websocket one: without it the only verdict
+        # a probe could reach here is "cannot connect", and the control this
+        # ticket is about would stay unexercised.
+        ha_client=_ha_rest_client(),
         ha_websocket_factory=partial(HomeAssistantWebSocketClient, connect=factory),
     )
     bench = TestBench(config, doorbell.state.doorbell, factory, broker)
