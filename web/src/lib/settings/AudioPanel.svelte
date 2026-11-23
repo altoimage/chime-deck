@@ -31,6 +31,7 @@
   import Spinner from '../ui/Spinner.svelte';
   import Stepper from '../ui/Stepper.svelte';
   import Toggle from '../ui/Toggle.svelte';
+  import { describeAudioTest } from './audio-check.js';
   import SectionFooter from './SectionFooter.svelte';
   import {
     DEFAULT_HARDWARE_VOLUME,
@@ -460,24 +461,6 @@
     return describeDrift(driftSeconds(clockReading.server_time_ms + elapsed, browserNow));
   }
 
-  function describeTest(result: AudioTestResponse): string {
-    if (!result.ok) {
-      return result.error ?? 'the test tone did not play';
-    }
-    if (result.device !== null && result.device !== '' && result.latency_ms !== null) {
-      return `Played on ${result.device} in ${result.latency_ms} ms`;
-    }
-    if (result.device !== null && result.device !== '' && result.latency_ms === null) {
-      return `Played on ${result.device} — the start delay was shorter than the tone, so it could not be timed`;
-    }
-    if (result.device !== null && result.device !== '') {
-      return `Played on ${result.device}`;
-    }
-    if (result.latency_ms !== null) {
-      return `Played in ${result.latency_ms} ms`;
-    }
-    return 'Test tone played.';
-  }
 </script>
 
 <div class="panel">
@@ -728,10 +711,10 @@
         <div class="test-result" aria-live="polite">
           {#if testResult.ok}
             <Badge kind="ok" label="Test tone played" />
-            <p>{describeTest(testResult)}</p>
+            <p>{describeAudioTest(testResult)}</p>
           {:else}
             <Badge kind="alert" label="Test failed" />
-            <p>{describeTest(testResult)}</p>
+            <p>{describeAudioTest(testResult)}</p>
             <Button onclick={() => void playTest()} disabled={testing}>Test again</Button>
           {/if}
         </div>

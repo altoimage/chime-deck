@@ -58,6 +58,13 @@
     padding: var(--gap) clamp(var(--gap), 3vw, calc(var(--gap) * 2)) 0;
   }
 
+  /* `UnprotectedBanner` renders nothing on a protected install; without this,
+     the wrapper's 16px top padding would make every wizard page scrollable by
+     16px for no content. */
+  .setup-banner:empty {
+    display: none;
+  }
+
   .setup-banner :global(.banner) {
     margin-bottom: 0;
   }

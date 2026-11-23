@@ -31,16 +31,28 @@
     dashboard straight back here — a loop. A failed skip therefore stays put
     and shows the reason.
 
+  The layout treats the document as the only scroller: a sticky masthead pins
+  to the top, the acting row is a sticky sibling of the step (a child of the
+  step could only pin against the step's own short box) so it pins to the
+  bottom, and every step change starts at the top again.
+
   Step 3 renders the shipped `EntityPicker` and `ButtonEditor` full-screen
   rather than a third, invented picker: the wizard is a route through the real
-  screens, never a parallel implementation of them.
+  screens, never a parallel implementation of them. It also carries the inline
+  speaker check — a volume slider saved on release and a test tone that is
+  requested only on the tap — because a silent doorbell is the worst failure
+  mode to discover after setup (D27).
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     ApiError,
     listButtonRows,
     listEntityRows,
+    readHardwareVolume,
     setAdminPassword,
+    testAudio,
+    type AudioTestResponse,
     type HaTestResponse,
     type MqttTestResponse
   } from '../api.js';
@@ -49,7 +61,9 @@
   import { lanSetupHint, setupDoneUrl } from '../setup.js';
   import Badge from '../ui/Badge.svelte';
   import Button from '../ui/Button.svelte';
+  import Card from '../ui/Card.svelte';
   import Input from '../ui/Input.svelte';
+  import Slider from '../ui/Slider.svelte';
   import Spinner from '../ui/Spinner.svelte';
   import {
     blankDraft,
@@ -74,6 +88,7 @@
   import HaConnectionFields from './HaConnectionFields.svelte';
   import MqttConnectionFields from './MqttConnectionFields.svelte';
   import UnprotectedBanner from './UnprotectedBanner.svelte';
+  import { describeAudioTest, describeHardwareLevel } from './audio-check.js';
 
   interface Props {
     /** Leave the wizard. A test passes a spy so nothing navigates. */
@@ -110,6 +125,17 @@
   let countError = $state<string | null>(null);
   let tiles = $state(0);
   let chimes = $state(0);
+
+  let speakerVolume = $state(100);
+  let volumeInitialised = $state(false);
+  let volumeSaving = $state(false);
+  let volumeSaveError = $state<string | null>(null);
+  let speakerTesting = $state(false);
+  let speakerResult = $state<AudioTestResponse | null>(null);
+  let hardwareNote = $state<string | null>(null);
+
+  /** The rendered step section, so a verdict that just arrived can be brought into view. */
+  let stepSection = $state<HTMLElement | null>(null);
 
   let dismissing = $state(false);
   let dismissError = $state<string | null>(null);
@@ -187,6 +213,16 @@
     if (settings.error !== null) {
       loadError = settings.error;
     }
+  });
+
+  // The speaker slider has its own initialisation flag: the draft effect above
+  // early-returns once the form is filled, so it cannot seed a second value.
+  $effect(() => {
+    if (!ready || volumeInitialised) {
+      return;
+    }
+    speakerVolume = settings.integer('audio.volume', 0, 100, 100);
+    volumeInitialised = true;
   });
 
   /** What a step-1 pass is a pass *about*: the address, the token, the clear. */
@@ -283,6 +319,8 @@
     haTestedSignature = haSignature();
     haResult = await runHaTest();
     haTesting = false;
+    await tick();
+    revealVerdict();
   }
 
   async function runMqttConnectionTest(): Promise<void> {
@@ -312,6 +350,42 @@
     mqttTestedSignature = mqttSignature();
     mqttResult = await runMqttTest();
     mqttTesting = false;
+    await tick();
+    revealVerdict();
+  }
+
+  /** A step change starts at the top: the previous step's scroll position is not this step's. */
+  function scrollToTop(): void {
+    if (typeof window !== 'undefined') {
+      window.scrollTo(0, 0);
+    }
+  }
+
+  /**
+   * Bring the verdict out from under the pinned action bar.
+   *
+   * `scrollIntoView` only knows the viewport, not the bar floating over the
+   * bottom of it — and that bar wraps to two rows when four buttons do not fit
+   * on one line, so no fixed `scroll-margin` can be right at every width. The
+   * second step measures the bar that is actually rendered and scrolls the
+   * difference. Instant, never smooth: there is no motion for
+   * `prefers-reduced-motion` to disable.
+   */
+  function revealVerdict(): void {
+    const verdict = stepSection?.querySelector<HTMLElement>('.result') ?? null;
+    if (verdict === null || typeof verdict.scrollIntoView !== 'function') {
+      return;
+    }
+    verdict.scrollIntoView({ block: 'nearest' });
+    const bar = document.querySelector<HTMLElement>('.actions--sticky');
+    if (bar === null || typeof window === 'undefined') {
+      return;
+    }
+    const covered =
+      verdict.getBoundingClientRect().bottom - bar.getBoundingClientRect().top;
+    if (covered > 0) {
+      window.scrollBy(0, covered + 8);
+    }
   }
 
   /** How many tiles and chimes already exist — the server's counts, never a guess. */
@@ -329,18 +403,80 @@
     }
   }
 
+  /**
+   * Save the speaker volume on its own: `audio.volume` is a different key group
+   * from either connection step, so this patch must never touch the draft.
+   */
+  async function saveSpeakerVolume(): Promise<void> {
+    if (volumeSaving) {
+      return;
+    }
+    if (speakerVolume === settings.integer('audio.volume', 0, 100, 100)) {
+      return;
+    }
+    volumeSaving = true;
+    volumeSaveError = null;
+    const ok = await settings.save({ 'audio.volume': speakerVolume });
+    volumeSaving = false;
+    if (!ok) {
+      volumeSaveError = settings.error ?? 'the volume could not be saved';
+    }
+  }
+
+  /**
+   * Play the tone and read the system level once, on the user's tap only.
+   *
+   * Nothing here runs at mount: a first-run page that probes the speaker
+   * unasked would make noise and spend a request the user did not ask for.
+   */
+  async function playTestSound(): Promise<void> {
+    if (speakerTesting) {
+      return;
+    }
+    speakerTesting = true;
+    speakerResult = null;
+    hardwareNote = null;
+    try {
+      const [tone, hardware] = await Promise.allSettled([testAudio(), readHardwareVolume()]);
+      if (tone.status === 'fulfilled') {
+        speakerResult = tone.value;
+      } else {
+        speakerResult = {
+          ok: false,
+          device: null,
+          latency_ms: null,
+          error: tone.reason instanceof ApiError
+            ? tone.reason.message
+            : 'the test sound could not be requested'
+        };
+      }
+      if (hardware.status === 'fulfilled') {
+        hardwareNote = describeHardwareLevel(hardware.value);
+      } else {
+        hardwareNote = 'The system volume could not be read; the tone above is the test that matters.';
+      }
+    } finally {
+      speakerTesting = false;
+    }
+    await tick();
+    revealVerdict();
+  }
+
   /** Leaving a full-screen picker or editor returns to step 3 with fresh counts. */
   function backToStep(): void {
+    scrollToTop();
     view = 'step';
     void loadCounts();
   }
 
   function advance(): void {
     if (step === 1 && haReady) {
+      scrollToTop();
       step = 2;
       return;
     }
     if (step === 2 && mqttReady) {
+      scrollToTop();
       step = 3;
       void loadCounts();
     }
@@ -348,19 +484,23 @@
 
   function back(): void {
     if (step === 2) {
+      scrollToTop();
       step = 1;
       return;
     }
     if (step === 3) {
+      scrollToTop();
       step = 2;
       return;
     }
     if (step === 4) {
+      scrollToTop();
       step = 3;
     }
   }
 
   function openSecurityStep(): void {
+    scrollToTop();
     adminCurrent = '';
     adminPassword = '';
     adminConfirm = '';
@@ -474,7 +614,7 @@
       {/if}
 
       {#if step === 1}
-        <section class="step" data-setup-step={1}>
+        <section class="step" data-setup-step={1} bind:this={stepSection}>
           <h1 class="step-title">Connect to Home Assistant</h1>
           <p class="lead">
             The doorbell reads your entities from Home Assistant and announces its chime buttons
@@ -492,14 +632,6 @@
             onclear={markTokenCleared}
           />
 
-          <div class="actions">
-            <Button loading={haTesting} onclick={runHaConnectionTest}>Test connection</Button>
-            <Button variant="primary" size="lg" disabled={!haReady} onclick={advance}>
-              Continue
-            </Button>
-            <Button disabled={dismissing} onclick={dismiss}>I'll do it later</Button>
-          </div>
-
           {#if haSaveError !== null}
             <p class="problem" role="alert">{haSaveError}</p>
           {/if}
@@ -507,7 +639,7 @@
           <ConnectionTestResult view={haView} />
         </section>
       {:else if step === 2}
-        <section class="step" data-setup-step={2}>
+        <section class="step" data-setup-step={2} bind:this={stepSection}>
           <h1 class="step-title">Connect to MQTT</h1>
           <p class="lead">
             The chime buttons are published to Home Assistant over MQTT, so the doorbell needs the
@@ -530,15 +662,6 @@
             The discovery prefix and instance id are in Settings → Connection.
           </p>
 
-          <div class="actions">
-            <Button loading={mqttTesting} onclick={runMqttConnectionTest}>Test MQTT</Button>
-            <Button variant="primary" size="lg" disabled={!mqttReady} onclick={advance}>
-              Continue
-            </Button>
-            <Button onclick={back}>Back</Button>
-            <Button disabled={dismissing} onclick={dismiss}>I'll do it later</Button>
-          </div>
-
           {#if mqttSaveError !== null}
             <p class="problem" role="alert">{mqttSaveError}</p>
           {/if}
@@ -546,7 +669,7 @@
           <ConnectionTestResult view={mqttView} />
         </section>
       {:else if step === 3}
-        <section class="step" data-setup-step={3}>
+        <section class="step" data-setup-step={3} bind:this={stepSection}>
           <h1 class="step-title">Add your first tile and a first chime</h1>
           <p class="lead">
             A tile shows one entity on the panel; a chime is a button that plays a sound or speaks a
@@ -576,6 +699,8 @@
             </div>
           {/if}
 
+          <!-- Step 3's own actions stay in the flow: a second sticky row would
+               pin on top of the finishing row below. -->
           <div class="actions">
             <Button variant="primary" size="lg" onclick={() => (view = 'tile')}>
               Add a first tile
@@ -601,15 +726,38 @@
             {/if}
           </div>
 
-          <div class="actions">
-            <Button onclick={openSecurityStep}>Protect the configuration interface</Button>
-            <Button variant="primary" size="lg" onclick={finish}>Finish setup</Button>
-            <Button onclick={back}>Back</Button>
-            <Button disabled={dismissing} onclick={dismiss}>I'll do it later</Button>
-          </div>
+          <Card title="Check the speaker">
+            <p class="speaker-hint">
+              Play a short tone on this device's own speaker, so you know a chime will be heard.
+            </p>
+            <!-- The change event fires on release, not on every drag tick: one save per gesture,
+                 the same commit-on-change wrapper AudioPanel uses for its sliders. -->
+            <div class="slider-commit" onchange={() => void saveSpeakerVolume()}>
+              <Slider label="Speaker volume" bind:value={speakerVolume} min={0} max={100} unit="%" />
+            </div>
+            <Button variant="primary" size="lg" loading={speakerTesting} onclick={playTestSound}>
+              Play test sound
+            </Button>
+            {#if volumeSaveError !== null}
+              <p class="problem" role="alert">{volumeSaveError}</p>
+            {/if}
+            <div class="result" aria-live="polite">
+              {#if speakerResult !== null}
+                {#if speakerResult.ok}
+                  <Badge kind="ok" label="Test sound played" />
+                {:else}
+                  <Badge kind="alert" label="Test sound failed" />
+                {/if}
+                <p class="facts">{describeAudioTest(speakerResult)}</p>
+              {/if}
+            </div>
+            {#if hardwareNote !== null}
+              <p class="speaker-hint" role="status">{hardwareNote}</p>
+            {/if}
+          </Card>
         </section>
       {:else}
-        <section class="step" data-setup-step={4}>
+        <section class="step" data-setup-step={4} bind:this={stepSection}>
           <h1 class="step-title">Protect the configuration interface</h1>
           <p class="lead">
             A password protects configuration settings on the admin interface, including each
@@ -652,16 +800,41 @@
           {#if adminError !== null}
             <p class="problem" role="alert">{adminError}</p>
           {/if}
-
-          <div class="actions">
-            <Button variant="primary" size="lg" loading={adminBusy} disabled={adminPasswordInvalid} onclick={setWizardPassword}>
-              Set password
-            </Button>
-            <Button onclick={finish}>Skip for now</Button>
-            <Button onclick={back}>Back</Button>
-          </div>
         </section>
       {/if}
+
+      <!-- The acting row is a sibling of the step, not part of it: a sticky
+           element is confined to its containing block, and the step is only as
+           tall as its own content. Against the frame it travels with the whole
+           page and pins to the viewport bottom, while the document stays the
+           one scroller. -->
+      <div class="actions actions--sticky">
+        {#if step === 1}
+          <Button loading={haTesting} onclick={runHaConnectionTest}>Test connection</Button>
+          <Button variant="primary" size="lg" disabled={!haReady} onclick={advance}>
+            Continue
+          </Button>
+          <Button disabled={dismissing} onclick={dismiss}>I'll do it later</Button>
+        {:else if step === 2}
+          <Button loading={mqttTesting} onclick={runMqttConnectionTest}>Test MQTT</Button>
+          <Button variant="primary" size="lg" disabled={!mqttReady} onclick={advance}>
+            Continue
+          </Button>
+          <Button onclick={back}>Back</Button>
+          <Button disabled={dismissing} onclick={dismiss}>I'll do it later</Button>
+        {:else if step === 3}
+          <Button onclick={openSecurityStep}>Protect the configuration interface</Button>
+          <Button variant="primary" size="lg" onclick={finish}>Finish setup</Button>
+          <Button onclick={back}>Back</Button>
+          <Button disabled={dismissing} onclick={dismiss}>I'll do it later</Button>
+        {:else}
+          <Button variant="primary" size="lg" loading={adminBusy} disabled={adminPasswordInvalid} onclick={setWizardPassword}>
+            Set password
+          </Button>
+          <Button onclick={finish}>Skip for now</Button>
+          <Button onclick={back}>Back</Button>
+        {/if}
+      </div>
     </div>
   {/if}
 </div>
@@ -688,17 +861,17 @@
     /* The horizontal padding is a property too: the sticky bar has to cancel it
        with a negative inline margin to reach the frame's edges. */
     --shell-pad: clamp(var(--gap), 3vw, calc(var(--gap) * 2));
-    /* The bar's own height, so sticky content below can sit under it. */
-    --shell-bar: calc(var(--tap) + var(--gap-sm) * 2);
+    /* The pinned bar's height, measured from the frame's top edge: it covers
+       the frame's own top padding, so content below can sit under it. */
+    --shell-bar: calc(var(--shell-pad) + var(--tap) + var(--gap-sm) * 2);
 
     display: flex;
     flex-direction: column;
     gap: var(--gap);
     width: min(100%, 720px);
-    min-height: var(--viewport-height);
     margin-inline: auto;
-    padding: var(--shell-pad);
-    padding-bottom: calc(var(--tap-primary) + env(safe-area-inset-bottom));
+    /* No inline bottom padding: the sticky bar below owns the bottom edge. */
+    padding: var(--shell-pad) var(--shell-pad) 0;
   }
 
   .masthead {
@@ -709,8 +882,11 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--gap-sm);
+    /* Full-bleed on the top edge too: content must never scroll through the
+       padding strip above a pinned bar. */
+    margin-block-start: calc(var(--shell-pad) * -1);
     margin-inline: calc(var(--shell-pad) * -1);
-    padding: var(--gap-sm) var(--shell-pad);
+    padding: var(--shell-pad) var(--shell-pad) var(--gap-sm);
     background: var(--bg);
   }
 
@@ -798,6 +974,44 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--gap-sm);
+  }
+
+  /* The acting row is a sibling of the step, so its containing block is the
+     tall frame and it has travel to pin against the viewport bottom. It owns
+     the bottom edge; the document remains the only scroller. */
+  .actions--sticky {
+    position: sticky;
+    bottom: 0;
+    z-index: var(--z-sticky);
+    margin-inline: calc(var(--shell-pad) * -1);
+    padding: var(--gap-sm) var(--shell-pad) max(var(--gap-sm), env(safe-area-inset-bottom));
+    background: var(--bg);
+    border-block-start: var(--border-width) solid var(--border);
+  }
+
+  /* Speaker-card body text: the same body size as every other sentence here. */
+  .speaker-hint {
+    margin: 0;
+    font-size: var(--text-body);
+    line-height: 1.45;
+    color: var(--text-muted);
+  }
+
+  .result {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap-sm);
+  }
+
+  /* The speaker verdict keeps its live region but leaves no gap when empty. */
+  .result:empty {
+    display: none;
+  }
+
+  .facts {
+    margin: 0;
+    font-size: var(--text-body);
+    line-height: 1.45;
   }
 
   /* A failure is a sentence the server wrote; it is never shrunk to helper text. */
