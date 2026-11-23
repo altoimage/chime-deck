@@ -417,7 +417,7 @@ act.
 
 ---
 
-## 10. Not in this batch
+## 10. Not yet covered
 
 Still future work, deliberately undocumented here:
 
@@ -436,7 +436,10 @@ first; a desktop session left running is the usual cause. If the panel comes up 
 a mode that is unusable on a small screen — the EDID-preferred mode is inherited by default —
 pin it from inside the compositor with `wlr-randr`; see
 [kiosk.md §7](kiosk.md#7-pinning-the-display-mode). Do not force it on the kernel command
-line: that route can cost you the display entirely and needs physical access. The kiosk is
+line: that route can cost you the display entirely and needs physical access. If the mode cannot
+change, or you would rather keep native resolution and the result is too dense to read, that is
+what the interface scale setting is for — Settings → Appearance, documented in
+[kiosk.md §7.3a](kiosk.md#73a-uiscale-making-the-interface-bigger-without-touching-the-mode). The kiosk is
 a second install surface with its own failure modes (seat, DRM, HDMI, screen blanking),
 which is why it is not a section of this backend guide.
 

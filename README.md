@@ -56,6 +56,10 @@ Think "video doorbell chime, but for every event in my house".
   and reused forever. Pressing the button a thousand times makes one TTS request, not a
   thousand, so cloud voice quotas last and presses are as fast as playing a local file.
   Only phrases containing live values are re-rendered per press.
+- **Fits the screen you have** — the layout fills whatever resolution and aspect ratio the panel
+  offers, and an **interface scale** setting (Settings → Appearance) grows the whole UI for a
+  high-DPI display whose mode you cannot change. Touch targets stay finger-sized at the smallest
+  step.
 - **Quiet hours** — stop the 3am chimes, with per-button exceptions for real alarms.
 - **Testable and observable** — every button has a test action, and a press history log
   tells you what played and when.
@@ -235,9 +239,9 @@ websocket clients, the audio engine, five TTS engines, quiet hours, the dashboar
 UI, systemd units, the kiosk wrapper, the Docker build and the release workflow (dry-run
 verified; no tag cut yet).
 
-What is left on the backlog is polish and hardware reach — high-DPI scaling, an all-in-one
-flashable image — not missing core functionality. Two honest limits: the reference panel has been
-verified by one person's ears, not a lab, and the container and aarch64 test tiers can prove a
+Nothing in the core is missing. What remains on the backlog is an all-in-one flashable image with
+first-boot Wi-Fi provisioning, and kernel-level polish. Two honest limits: the reference panel has
+been verified by one person's ears, not a lab, and the container and aarch64 test tiers can prove a
 sound *decoded and played*, never that it was *heard* (see Testing below).
 
 ## Licence
