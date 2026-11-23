@@ -224,7 +224,7 @@ Run these from the repo root, bounded:
 ```bash
 timeout 120 uv run ruff check .
 timeout 120 uv run ruff format --check .
-timeout 180 uv run mypy src
+timeout 240 uv run mypy                # bare: pyproject declares the one scope (src + tests)
 timeout 300 uv run pytest
 ```
 
@@ -236,7 +236,7 @@ cd web && timeout 900 npm run verify        # svelte-check, contrast, storyboard
 cd web && timeout 900 npm run test:browser  # Playwright, against a real backend
 ```
 
-Current baselines to hold: **2575 passed / 12 skipped** (backend), **961** vitest, **82** Playwright.
+Current baselines to hold: **2610 passed / 12 skipped** (backend), **1008** vitest, **97** Playwright.
 
 Skip a command only if it genuinely cannot apply yet, and say so explicitly in the report.
 
