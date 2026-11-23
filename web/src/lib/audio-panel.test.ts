@@ -56,20 +56,22 @@ function fakeFetch(
   return calls;
 }
 
+interface HardwareResponse {
+  ok: boolean;
+  available: boolean;
+  device: string | null;
+  control: string | null;
+  percent: number | null;
+  muted: boolean;
+  reason: string;
+  configured: number;
+  applied: number | null;
+}
+
 interface BackendOptions {
   settings?: Record<string, unknown>;
   devices?: DeviceRow[];
-  hardware?: {
-    ok: boolean;
-    available: boolean;
-    device: string | null;
-    control: string | null;
-    percent: number | null;
-    muted: boolean;
-    reason: string;
-    configured: number;
-    applied: number | null;
-  };
+  hardware?: HardwareResponse | HardwareResponse[];
   audioTest?: unknown;
   dateHeader?: string | null;
   patchError?: { status: number; body: unknown };
@@ -89,6 +91,7 @@ interface Backend {
 function fakeBackend(options: BackendOptions = {}): Backend {
   const storedSettings: Record<string, unknown> = { ...(options.settings ?? {}) };
   const devices = options.devices ?? DEFAULT_DEVICES;
+  let hardwareResponseIndex = 0;
   const calls = fakeFetch((path, init) => {
     if (path === '/api/settings' && init?.method === 'PATCH') {
       if (options.patchError) {
@@ -105,19 +108,27 @@ function fakeBackend(options: BackendOptions = {}): Backend {
 
     if (path === '/api/audio/hardware') {
       const configured = Number(storedSettings['audio.hardware_volume'] ?? 100);
-      return jsonResponse(
-        options.hardware ?? {
-          ok: true,
-          available: true,
-          device: 'alsa/usb-audio',
-          control: 'Speaker',
-          percent: configured,
-          muted: false,
-          reason: '',
-          configured,
-          applied: null
+      const hardware = options.hardware;
+      if (Array.isArray(hardware)) {
+        const response = hardware[Math.min(hardwareResponseIndex, hardware.length - 1)];
+        hardwareResponseIndex += 1;
+        if (response !== undefined) {
+          return jsonResponse(response);
         }
-      );
+      } else if (hardware !== undefined) {
+        return jsonResponse(hardware);
+      }
+      return jsonResponse({
+        ok: true,
+        available: true,
+        device: 'alsa/usb-audio',
+        control: 'Speaker',
+        percent: configured,
+        muted: false,
+        reason: '',
+        configured,
+        applied: null
+      });
     }
 
     if (path === '/api/audio/devices') {
@@ -430,6 +441,98 @@ describe('two-stage output volume', () => {
       'Speaker on alsa/hw:CARD=Device,DEV=0 — the device reports 43% right now.'
     );
     expect(pageText()).toContain('You asked for 100%, but the device reports 43%.');
+  });
+
+  it('shows the requested and the reached level without a reload', async () => {
+    const backend = await loadAndRender({
+      settings: { 'audio.hardware_volume': 59 },
+      hardware: [
+        {
+          ok: true,
+          available: true,
+          device: 'alsa/usb-audio',
+          control: 'Speaker',
+          percent: 43,
+          muted: false,
+          reason: '',
+          configured: 59,
+          applied: null
+        },
+        {
+          ok: true,
+          available: true,
+          device: 'alsa/usb-audio',
+          control: 'Speaker',
+          percent: 43,
+          muted: false,
+          reason: '',
+          configured: 60,
+          applied: null
+        },
+        {
+          ok: true,
+          available: true,
+          device: 'alsa/usb-audio',
+          control: 'Speaker',
+          percent: 65,
+          muted: false,
+          reason: '',
+          configured: 60,
+          applied: 65
+        }
+      ]
+    });
+
+    buttonByAriaLabel('Increase Hardware volume').click();
+    flushSync();
+    buttonByText('Save').click();
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+    await vi.waitFor(() => expect(pageText()).toContain('The last write reached 65%.'));
+
+    expect(patchBody(patches(backend.calls)[0])).toEqual({ 'audio.hardware_volume': 60 });
+    expect(pathCalls(backend.calls, '/api/audio/hardware')).toHaveLength(3);
+    expect(pageText()).toContain('the device reports 65% right now.');
+    expect(pageText()).toContain('You asked for 60%, but the device reports 65%.');
+    expect(pageText()).toContain('The last write reached 65%.');
+  });
+
+  it('does not repeat the reached level when the write matched the request', async () => {
+    const backend = await loadAndRender({
+      settings: { 'audio.hardware_volume': 64 },
+      hardware: [
+        {
+          ok: true,
+          available: true,
+          device: 'alsa/usb-audio',
+          control: 'Speaker',
+          percent: 64,
+          muted: false,
+          reason: '',
+          configured: 64,
+          applied: null
+        },
+        {
+          ok: true,
+          available: true,
+          device: 'alsa/usb-audio',
+          control: 'Speaker',
+          percent: 65,
+          muted: false,
+          reason: '',
+          configured: 65,
+          applied: 65
+        }
+      ]
+    });
+
+    buttonByAriaLabel('Increase Hardware volume').click();
+    flushSync();
+    buttonByText('Save').click();
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+    await vi.waitFor(() => expect(pageText()).toContain('the device reports 65% right now.'));
+
+    expect(pathCalls(backend.calls, '/api/audio/hardware')).toHaveLength(2);
+    expect(pageText()).not.toContain('The last write reached');
   });
 
   it('saves the rail target and bounds the advanced hardware-control name', async () => {

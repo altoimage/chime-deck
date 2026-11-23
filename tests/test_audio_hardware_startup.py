@@ -183,6 +183,61 @@ async def test_a_settings_change_reapplies_the_stored_level(tmp_path: Path) -> N
     assert state.health.get("audio") is HealthStatus.READY
 
 
+def _a_reapply_is_still_running() -> bool:
+    """Return whether a settings-driven re-apply is still running.
+
+    The wiring schedules each one as a task named ``hardware-volume`` before the
+    ``PATCH`` response returns, so waiting for those tasks to finish is a bound on
+    "this change has really been applied" without any guessing sleep.
+    """
+    return any(
+        task.get_name() == "hardware-volume" and not task.done() for task in asyncio.all_tasks()
+    )
+
+
+async def _patch_volume(client: httpx.AsyncClient, percent: int) -> None:
+    """Write ``audio.hardware_volume`` and wait for the re-apply it schedules.
+
+    :param client: client bound to the running app.
+    :param percent: stored level to ask for.
+    """
+    response = await asyncio.wait_for(
+        client.patch("/api/settings", json={"audio.hardware_volume": percent}),
+        timeout=_PATCH_TIMEOUT_S,
+    )
+    assert response.status_code == 200
+    await wait_until(lambda: not _a_reapply_is_still_running(), timeout=_SETTLE_TIMEOUT_S)
+
+
+async def test_a_second_settings_change_at_the_reached_level_does_not_rewrite_the_mixer(
+    tmp_path: Path,
+) -> None:
+    """A coarse card is written once per reached level, not on every settings write.
+
+    The card starts at the seeded 43 and turns a request of 60 into 65, so the
+    first change writes once and the second change finds the device already at
+    the level that request reaches.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    await _seed(tmp_path, {"audio.hardware_volume": 43})
+    mixer = FakeMixer({"Speaker": FakeControl(percent=43, write_percent=65)})
+    spawner = RecordingSpawner(mixer)
+    app, _state = _app(tmp_path, _backend(), spawner)
+
+    async with _running(app) as client:
+        await _patch_volume(client, 60)
+        await _patch_volume(client, 60)
+
+    assert spawner.argv_matching("amixer", "sset") == [
+        ("amixer", "-c", "Device", "sset", "Speaker", "60%", "unmute")
+    ]
+    # Three applies ran — startup and one per settings write — so it is the guard
+    # that skipped the second write, not a route that ignores an unchanged value.
+    assert len(spawner.argv_matching("amixer", "scontrols")) == 3
+    assert mixer.controls["Speaker"].percent == 65
+
+
 async def test_a_mixer_failure_never_flips_audio_health_to_error(tmp_path: Path) -> None:
     """A host without ``amixer`` still plays chimes; only the device level is unavailable.
 

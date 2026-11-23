@@ -81,19 +81,29 @@ _PULSE_PREFIXES: Final = ("pulse", "pipewire")
 _AMIXER: Final = "amixer"
 _PACTL: Final = "pactl"
 
+_LANDED_LIMIT: Final = 32
+"""How many request → reached-level pairs the in-process memo keeps.
+
+One entry per (control, requested value) is all a session needs, so the cap is
+only a guard against a long uptime with many settings changes: the oldest entry
+is evicted once it is exceeded.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class HardwareVolumeStatus:
     """What the device's own control says, and whether the app could reach it.
 
     ``available`` is true only when a control the app can both read and write was
-    found and read; ``percent`` is therefore the value actually read back, never
-    the value that was asked for. ``device`` is the resolved output's mpv name,
-    so the mixer and the playback cannot disagree about the output, and
-    ``control`` is the ALSA simple-mixer control name or the Pulse/PipeWire sink.
-    ``reason`` is ``""`` when available and one actionable sentence otherwise.
-    ``applied`` remembers the percent the last :meth:`HardwareVolume.apply`
-    actually wrote, taken from the read-back that followed the write, so the
+    found and read; ``percent`` is therefore the device's own answer, never the
+    value that was asked for, and on a card whose control has coarse steps it can
+    legitimately differ from the request (a C-Media panel turns 60 into 65).
+    ``device`` is the resolved output's mpv name, so the mixer and the playback
+    cannot disagree about the output, and ``control`` is the ALSA simple-mixer
+    control name or the Pulse/PipeWire sink. ``reason`` is ``""`` when available
+    and one actionable sentence otherwise. ``applied`` is the level the last
+    :meth:`HardwareVolume.apply` write reached, taken from the read-back that
+    followed the write, and ``None`` when that call wrote nothing — so the
     settings page can show "you asked for 100, the device now says 100".
     """
 
@@ -320,9 +330,11 @@ class HardwareVolume:
 
     :meth:`read` is the read-only verdict the API route uses: it never changes
     the mixer. :meth:`apply` is what startup, every device change and every
-    ``audio.*`` change invokes: it writes only when the read-back differs, so a
-    boot whose stored value already matches causes no click and no churn, and a
-    muted control is cleared in the same ``sset``.
+    ``audio.*`` change invokes: it writes only when the read-back differs from the
+    request or from the level this target reaches for it, so a boot whose stored
+    value already matches causes no click and no churn — and neither does a second
+    apply on a card that cannot land on the request. A muted control is cleared in
+    the same ``sset``.
     """
 
     def __init__(
@@ -350,6 +362,12 @@ class HardwareVolume:
         self._lock = asyncio.Lock()
         self._status: HardwareVolumeStatus | None = None
         self._applied: int | None = None
+        self._landed: dict[tuple[str, str, str, int], int] = {}
+        """What each request actually reached: (medium, device, control, asked) → read.
+
+        In-process only, because it describes this card's steps rather than the
+        settings: a fresh boot starts empty and writes once, exactly as before.
+        """
 
     @property
     def status(self) -> HardwareVolumeStatus | None:
@@ -372,9 +390,12 @@ class HardwareVolume:
         The target is ``0`` when ``audio.muted`` is true and otherwise
         ``audio.hardware_volume``; the write happens only when the current value
         differs or the control is muted while the target is not, so an already
-        correct device is left alone. ``applied`` is taken from a fresh read
-        after the write, never from the value that was requested: the panel must
-        show what the device says, not what the app hoped.
+        correct device is left alone. The guard also honours the level this
+        target last reached for this request: a card with coarse steps that turns
+        60 into 65 is not rewritten on every apply once it sits at 65. ``applied``
+        is taken from a fresh read after the write, never from the value that was
+        requested: the panel must show what the device says, not what the app
+        hoped.
         """
         async with self._lock:
             return await self._apply_locked()
@@ -402,8 +423,13 @@ class HardwareVolume:
                 self._status = status
                 return status
             target_percent = await self._target_percent()
-            if reading.percent == target_percent and not (reading.muted and target_percent > 0):
-                # Already right: no write, so no click and no settings churn.
+            landed = self._landed.get((*_target_identity(resolution.target), target_percent))
+            at_achieved = landed is not None and reading.percent == landed
+            if (reading.percent == target_percent or at_achieved) and not (
+                reading.muted and target_percent > 0
+            ):
+                # Already at the level this target reaches for this request: no
+                # write, so no click and no settings churn on a coarse control.
                 self._status = status
                 return status
             failure = await self._write(resolution.target, target_percent)
@@ -413,10 +439,13 @@ class HardwareVolume:
                 return status
             confirmed = await self._read_target(resolution.target)
             if confirmed.percent is None:
-                status = replace(status, available=False, reason=confirmed.reason, applied=None)
+                # The write may well have landed, so the pre-write reading is not
+                # a fact about the device any more: report the failed read itself.
+                status = _status_of(resolution, confirmed, None)
                 self._status = status
                 return status
             self._applied = confirmed.percent
+            self._remember_landed(resolution.target, target_percent, confirmed.percent)
             status = _status_of(resolution, confirmed, self._applied)
             self._status = status
             return status
@@ -432,6 +461,22 @@ class HardwareVolume:
             )
             self._status = status
             return status
+
+    def _remember_landed(self, target: _MixerTarget, requested: int, landed: int) -> None:
+        """Remember the level one write of *requested* actually reached.
+
+        A card with coarse steps answers 65 to a request of 60, so the next apply
+        needs to know that 65 *is* the reached level of 60 rather than churn
+        another ``sset``. The oldest entry is evicted past
+        :data:`_LANDED_LIMIT`, which keeps the memo bounded without a clock.
+
+        :param target: the control that was written.
+        :param requested: the percentage the write asked for.
+        :param landed: the percentage the read-back reported afterwards.
+        """
+        self._landed[(*_target_identity(target), requested)] = landed
+        if len(self._landed) > _LANDED_LIMIT:
+            del self._landed[next(iter(self._landed))]
 
     async def _probe(self) -> tuple[_Resolution, _Reading]:
         """Resolve the output and read its control once.
@@ -604,6 +649,19 @@ class HardwareVolume:
         if isinstance(stored, bool) or not isinstance(stored, int):
             return 100
         return min(max(stored, 0), 100)
+
+
+def _target_identity(target: _MixerTarget) -> tuple[str, str, str]:
+    """Return the key that identifies one control, for the reached-level memo.
+
+    The card token is deliberately left out: the same control on the same mpv
+    device is the same tap, and a card that moves from an index to a name is a
+    fresh card anyway.
+
+    :param target: the resolved control.
+    :return: ``(medium, device, control)``.
+    """
+    return (target.medium, target.device, target.control)
 
 
 def _status_of(

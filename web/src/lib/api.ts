@@ -422,18 +422,21 @@ export interface AudioDevicesResponse {
  *
  * An unavailable mixer is a normal HTTP 200 verdict; `reason` is the sentence
  * the panel shows beside its disabled hardware control. `configured` is the
- * saved target, while `percent` is the device's current read-back.
+ * stored request, `percent` is the device's own read-back after the last write,
+ * and `applied` records what that write actually reached.
  */
 export interface HardwareVolumeResponse {
   ok: boolean;
   available: boolean;
   device: string | null;
   control: string | null;
+  /** The device's own answer, read after the last write; coarse hardware steps can make it differ from `configured`. */
   percent: number | null;
   muted: boolean;
   reason: string;
-  /** The stored `audio.hardware_volume`, or null when the store held no integer. */
+  /** The stored `audio.hardware_volume` request; it is never overwritten with a read-back or rounded. */
   configured: number | null;
+  /** The level the last write actually reached, or null when that write did not happen or nothing was written. */
   applied: number | null;
 }
 

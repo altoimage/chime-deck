@@ -116,15 +116,17 @@ class HardwareVolumeResponse(BaseModel):
     """The device's own volume control, what the settings ask for, and what was written.
 
     ``available`` is true only when a control was found and read, so ``percent``
-    is the value actually on the device and ``reason`` is ``""``. ``device`` is
-    the resolved output's mpv name and ``control`` the ALSA simple-mixer control
-    or the Pulse/PipeWire sink. ``configured`` echoes the stored
-    ``audio.hardware_volume`` so the panel can show "you asked for 100, the device
-    says 43" in one glance; ``applied`` is the percent the last apply of this
-    process actually wrote, or ``None`` when that call wrote nothing. ``ok`` is
-    false only when the route could not get an answer at all: an output with no
-    hardware volume control is an answer and reports ``available: false`` with its
-    reason.
+    is the device's own answer, read *after* the last write, and ``reason`` is
+    ``""``. On a coarse control ``percent`` can therefore legitimately differ
+    from ``configured``: the panel's C-Media card lands 65 when asked for 60.
+    ``device`` is the resolved output's mpv name and ``control`` the ALSA
+    simple-mixer control or the Pulse/PipeWire sink. ``configured`` is the stored
+    ``audio.hardware_volume`` — the request — so the panel can show "you asked for
+    100, the device says 43" in one glance; it is never overwritten with a
+    read-back and never rounded. ``applied`` is the level the last write of this
+    process reached, or ``None`` when that call wrote nothing. ``ok`` is false only
+    when the route could not get an answer at all: an output with no hardware
+    volume control is an answer and reports ``available: false`` with its reason.
     """
 
     ok: bool

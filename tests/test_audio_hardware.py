@@ -463,6 +463,163 @@ async def test_applied_comes_from_the_read_back_not_from_the_request(
     assert status.applied == 37
 
 
+async def test_a_quantising_card_reports_the_level_it_reached(store: ConfigStore) -> None:
+    """The panel's C-Media card turns 60 into 65, and both numbers are reported honestly.
+
+    ``percent`` and ``applied`` are the device's own answer (65) while the command
+    that was run still asked for the stored value (60%): nothing snaps or rounds
+    the request on its way to ``amixer``.
+    """
+    await store.set_setting("audio.hardware_volume", 60)
+    mixer = FakeMixer({"Speaker": FakeControl(percent=43, write_percent=65)})
+    spawner = RecordingSpawner(mixer)
+
+    status = await _service(store, spawner).apply()
+
+    assert status.available is True
+    assert status.percent == 65
+    assert status.applied == 65
+    assert spawner.argv_matching("amixer", "sset") == [
+        ("amixer", "-c", "Device", "sset", "Speaker", "60%", "unmute")
+    ]
+    assert not any("65%" in call for call in spawner.calls)
+
+
+async def test_the_stored_request_survives_a_quantised_write(store: ConfigStore) -> None:
+    """The read-back never overwrites the stored request, even when it differs."""
+    await store.set_setting("audio.hardware_volume", 63)
+    mixer = FakeMixer({"Speaker": FakeControl(percent=43, write_percent=65)})
+
+    status = await _service(store, RecordingSpawner(mixer)).apply()
+
+    assert await store.get_setting("audio.hardware_volume") == 63
+    assert status.percent == 65
+    assert status.applied == 65
+
+
+async def test_a_repeat_apply_at_the_reached_level_is_not_written_again(
+    store: ConfigStore,
+) -> None:
+    """A coarse card is written once, not on every apply that follows.
+
+    The read-back (65) never equals the request (60), so a guard that compared
+    the two alone re-issued ``sset`` on every settings change, device change and
+    test tone.
+    """
+    await store.set_setting("audio.hardware_volume", 60)
+    mixer = FakeMixer({"Speaker": FakeControl(percent=43, write_percent=65)})
+    service = _service(store, RecordingSpawner(mixer))
+
+    await service.apply()
+    second = await service.apply()
+
+    assert mixer.writes == [("Speaker", 60)]
+    assert second.percent == 65
+    assert second.applied is None
+
+
+async def test_a_device_that_drifted_off_the_reached_level_is_written_again(
+    store: ConfigStore,
+) -> None:
+    """The other direction: a control that moved on its own is still corrected."""
+    await store.set_setting("audio.hardware_volume", 60)
+    mixer = FakeMixer({"Speaker": FakeControl(percent=43, write_percent=65)})
+    service = _service(store, RecordingSpawner(mixer))
+
+    await service.apply()
+    # The OS moved the control behind the service's back; 40 is neither the
+    # request nor the level this card reaches for it.
+    mixer.controls["Speaker"].percent = 40
+    drifted = await service.apply()
+
+    assert mixer.writes == [("Speaker", 60), ("Speaker", 60)]
+    assert drifted.percent == 65
+    assert drifted.applied == 65
+
+
+async def test_a_changed_request_is_written_again_after_a_quantised_write(
+    store: ConfigStore,
+) -> None:
+    """Reached levels are remembered per request, so 70 is not mistaken for 60.
+
+    60 lands on 65 and 70 lands on 70. Asking for 60 again while the device sits
+    at 70 must write: 70 is not the level 60 reaches. A memo keyed only by target
+    would skip that write and leave the device above the request.
+    """
+    await store.set_setting("audio.hardware_volume", 60)
+    control = FakeControl(percent=43, write_percent=65)
+    mixer = FakeMixer({"Speaker": control})
+    service = _service(store, RecordingSpawner(mixer))
+
+    await service.apply()
+    await store.set_setting("audio.hardware_volume", 70)
+    control.write_percent = None  # this card can land on 70 exactly
+    await service.apply()
+    await store.set_setting("audio.hardware_volume", 60)
+    control.write_percent = 65
+    third = await service.apply()
+
+    assert mixer.writes == [("Speaker", 60), ("Speaker", 70), ("Speaker", 60)]
+    assert third.percent == 65
+
+
+async def test_a_failed_read_back_is_not_reported_as_the_level_before_the_write(
+    store: ConfigStore,
+) -> None:
+    """A successful ``sset`` whose ``sget`` fails fabricates no percentage.
+
+    The pre-write reading is not a fact about the device any more once the write
+    landed, so the status has no ``percent`` at all and says why.
+    """
+    await store.set_setting("audio.hardware_volume", 60)
+    written: list[bool] = []
+
+    def _handler(argv: tuple[str, ...]) -> FakeCommand:
+        if "scontrols" in argv:
+            return FakeCommand(stdout="Simple mixer control 'Speaker',0\n")
+        if "sset" in argv:
+            written.append(True)
+            return FakeCommand()
+        if written:
+            return FakeCommand(returncode=1, stderr="amixer: Mixer attach default error")
+        return FakeCommand(stdout="  Front Left: Playback 43 [43%] [-20.00dB] [on]\n")
+
+    status = await _service(store, RecordingSpawner(_handler)).apply()
+
+    assert status.available is False
+    assert status.percent is None
+    assert status.applied is None
+    assert "amixer sget Speaker failed" in status.reason
+
+
+async def test_a_failed_read_back_on_a_pulse_sink_is_not_the_pre_write_level(
+    store: ConfigStore,
+) -> None:
+    """The Pulse twin: a ``pactl`` read after the write fails and is reported."""
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    written: list[bool] = []
+
+    def _handler(argv: tuple[str, ...]) -> FakeCommand:
+        command = argv[1]
+        if command == "set-sink-volume":
+            written.append(True)
+            return FakeCommand()
+        if command == "set-sink-mute":
+            return FakeCommand()
+        if command == "get-sink-mute":
+            return FakeCommand(stdout="Mute: no\n")
+        if written:
+            return FakeCommand(returncode=1, stderr="pactl: Connection failure")
+        return FakeCommand(stdout="Volume: front-left: 26214 / 40% / -23.81 dB\n")
+
+    status = await _service(store, RecordingSpawner(_handler), backend).apply()
+
+    assert status.available is False
+    assert status.percent is None
+    assert status.applied is None
+    assert "pactl get-sink-volume alsa_output.usb-card failed" in status.reason
+
+
 async def test_a_muted_control_is_unmuted_by_the_same_write(store: ConfigStore) -> None:
     """Being at the right percentage but muted still needs one ``sset ... unmute``."""
     mixer = FakeMixer({"Speaker": FakeControl(percent=100, muted=True)})

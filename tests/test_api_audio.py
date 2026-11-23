@@ -23,7 +23,7 @@ from typing import cast
 
 import httpx
 import pytest
-from audio_hardware_fakes import FakeControl, FakeMixer, FakePulse, RecordingSpawner
+from audio_hardware_fakes import FakeCommand, FakeControl, FakeMixer, FakePulse, RecordingSpawner
 from chime_fakes import build_offline_wiring
 from fastapi import FastAPI
 from log_isolation import preserve_log_state
@@ -505,6 +505,65 @@ async def test_the_hardware_route_shows_the_level_startup_wrote(tmp_path: Path) 
     assert body["percent"] == 100
     assert body["applied"] == 100
     assert body["configured"] == 100
+
+
+async def test_the_hardware_route_reports_the_level_the_card_reached(tmp_path: Path) -> None:
+    """A coarse card is reported with its own number, not the one that was asked for.
+
+    The stored 60 is the request (``configured``) and stays 60; the device answered
+    65, which is what both ``percent`` and ``applied`` say.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    async with ConfigStore(tmp_path / "doorbell.db") as seeded:
+        await seeded.set_setting("audio.hardware_volume", 60)
+    app, _state = _build_app(
+        tmp_path,
+        _usb_backend(),
+        hardware_spawner=RecordingSpawner(
+            FakeMixer({"Speaker": FakeControl(percent=43, write_percent=65)})
+        ),
+    )
+
+    async with _running(app) as client:
+        response = await _get(client, "/api/audio/hardware")
+
+    assert response.status_code == 200
+    body = _body(response)
+    assert body["ok"] is True
+    assert body["percent"] == 65
+    assert body["configured"] == 60
+    assert body["applied"] == 65
+
+
+async def test_a_failed_read_back_is_an_honest_answer_on_the_route(tmp_path: Path) -> None:
+    """A write whose read-back fails answers 200 with no percentage, never a 500.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    written: list[bool] = []
+
+    def _handler(argv: tuple[str, ...]) -> FakeCommand:
+        if "scontrols" in argv:
+            return FakeCommand(stdout="Simple mixer control 'Speaker',0\n")
+        if "sset" in argv:
+            written.append(True)
+            return FakeCommand()
+        if written:
+            return FakeCommand(returncode=1, stderr="amixer: Mixer attach default error")
+        return FakeCommand(stdout="  Front Left: Playback 43 [43%] [-20.00dB] [on]\n")
+
+    app, _state = _build_app(tmp_path, _usb_backend(), hardware_spawner=RecordingSpawner(_handler))
+
+    async with _running(app) as client:
+        response = await _get(client, "/api/audio/hardware")
+
+    assert response.status_code == 200
+    body = _body(response)
+    assert body["ok"] is False
+    assert body["available"] is False
+    assert body["percent"] is None
+    assert "amixer sget Speaker failed" in cast("str", body["reason"])
 
 
 async def test_an_output_with_no_hardware_control_is_an_honest_answer(tmp_path: Path) -> None:

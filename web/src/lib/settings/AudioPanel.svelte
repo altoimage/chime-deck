@@ -69,6 +69,8 @@
   let hardwareLoading = $state(true);
   let hardwareError = $state<string | null>(null);
   let hardwareSequence = 0;
+  let hardwareSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  let hardwareSettleResume: (() => void) | null = null;
 
   let discovery = $state<AudioDevicesResponse | null>(null);
   let discoveryLoading = $state(true);
@@ -186,7 +188,18 @@
     }
   }
 
+  function cancelHardwareSettle(): void {
+    if (hardwareSettleTimer !== null) {
+      clearTimeout(hardwareSettleTimer);
+      hardwareSettleTimer = null;
+    }
+    const resume = hardwareSettleResume;
+    hardwareSettleResume = null;
+    resume?.();
+  }
+
   async function refreshHardware(): Promise<void> {
+    cancelHardwareSettle();
     const sequence = ++hardwareSequence;
     hardwareLoading = true;
     hardwareError = null;
@@ -196,6 +209,53 @@
         return;
       }
       hardwareStatus = response;
+    } catch (cause) {
+      if (!alive || sequence !== hardwareSequence) {
+        return;
+      }
+      hardwareError =
+        cause instanceof ApiError ? cause.message : 'the hardware volume could not be read';
+    } finally {
+      if (alive && sequence === hardwareSequence) {
+        hardwareLoading = false;
+      }
+    }
+  }
+
+  async function settleHardware(): Promise<void> {
+    cancelHardwareSettle();
+    const sequence = ++hardwareSequence;
+    hardwareLoading = true;
+    hardwareError = null;
+    try {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise<void>((resolve) => {
+            hardwareSettleResume = resolve;
+            hardwareSettleTimer = setTimeout(() => {
+              hardwareSettleTimer = null;
+              hardwareSettleResume = null;
+              resolve();
+            }, 150);
+          });
+        }
+        if (!alive || sequence !== hardwareSequence) {
+          return;
+        }
+        const response = await readHardwareVolume();
+        if (!alive || sequence !== hardwareSequence) {
+          return;
+        }
+        hardwareStatus = response;
+        if (
+          !response.ok ||
+          !response.available ||
+          response.applied !== null ||
+          response.percent === response.configured
+        ) {
+          return;
+        }
+      }
     } catch (cause) {
       if (!alive || sequence !== hardwareSequence) {
         return;
@@ -239,6 +299,7 @@
       alive = false;
       clearInterval(interval);
       discoverySequence += 1;
+      cancelHardwareSettle();
       hardwareSequence += 1;
     };
   });
@@ -300,7 +361,17 @@
     if (ok) {
       rebase();
       void refreshDiscovery();
-      void refreshHardware();
+      const hardwareKeys = [
+        'audio.hardware_volume',
+        'audio.muted',
+        'audio.hardware_control',
+        'audio.device_hint'
+      ];
+      if (hardwareKeys.some((key) => key in patch)) {
+        void settleHardware();
+      } else {
+        void refreshHardware();
+      }
     } else {
       saveError = settings.error ?? 'the settings could not be saved';
     }
@@ -544,6 +615,12 @@
             hardwareStatus.configured !== hardwareStatus.percent}
             <p class="mismatch" role="status">
               You asked for {hardwareStatus.configured}%, but the device reports {hardwareStatus.percent}%.
+            </p>
+          {/if}
+          {#if hardwareStatus.applied !== null &&
+            hardwareStatus.applied !== hardwareStatus.configured}
+            <p class="mismatch" role="status">
+              The last write reached {hardwareStatus.applied}%.
             </p>
           {/if}
         {/if}
