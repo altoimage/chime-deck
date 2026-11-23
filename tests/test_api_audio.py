@@ -23,7 +23,14 @@ from typing import cast
 
 import httpx
 import pytest
-from audio_hardware_fakes import FakeCommand, FakeControl, FakeMixer, FakePulse, RecordingSpawner
+from audio_hardware_fakes import (
+    FakeCommand,
+    FakeControl,
+    FakeMixer,
+    FakePulse,
+    RecordingSpawner,
+    pulse_with_card,
+)
 from chime_fakes import build_offline_wiring
 from fastapi import FastAPI
 from log_isolation import preserve_log_state
@@ -58,6 +65,7 @@ _HARDWARE_KEYS = {
     "reason",
     "configured",
     "applied",
+    "sink_percent",
 }
 _DEVICE_KEYS = {"name", "hostapi", "is_default"}
 
@@ -617,9 +625,14 @@ async def test_the_hardware_route_reports_a_pulse_sink(tmp_path: Path) -> None:
     :param tmp_path: pytest temporary directory.
     """
     backend = _FakeBackend([AudioDevice(name="pulse/my-sink", hostapi="pulse", is_default=True)])
-    app, _state = _build_app(
-        tmp_path, backend, hardware_spawner=RecordingSpawner(FakePulse(percent=40))
+    pulse = FakePulse(
+        percent=40,
+        sink="my-sink",
+        alsa_card="1",
+        alsa_id="Device",
+        mixer=FakeMixer({"Speaker": FakeControl(percent=100)}),
     )
+    app, _state = _build_app(tmp_path, backend, hardware_spawner=RecordingSpawner(pulse))
 
     async with _running(app) as client:
         response = await _get(client, "/api/audio/hardware")
@@ -629,6 +642,68 @@ async def test_the_hardware_route_reports_a_pulse_sink(tmp_path: Path) -> None:
     assert body["control"] == "my-sink"
     assert body["percent"] == 100
     assert body["applied"] == 100
+    assert body["sink_percent"] == 100
+
+
+async def test_the_hardware_route_reports_what_the_card_reached_on_a_pulse_sink(
+    tmp_path: Path,
+) -> None:
+    """``percent``/``applied`` are the card's level; ``sink_percent`` is the sink's.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    async with ConfigStore(tmp_path / "doorbell.db") as seeded:
+        await seeded.set_setting("audio.hardware_volume", 60)
+    backend = _FakeBackend(
+        [AudioDevice(name="pulse/alsa_output.usb-card", hostapi="pulse", is_default=True)]
+    )
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=43, write_percent=65)})
+    spawner = RecordingSpawner(pulse)
+    app, _state = _build_app(tmp_path, backend, hardware_spawner=spawner)
+
+    async with _running(app) as client:
+        response = await _get(client, "/api/audio/hardware")
+
+    assert response.status_code == 200
+    body = _body(response)
+    assert body["ok"] is True
+    assert body["available"] is True
+    assert body["percent"] == 65
+    assert body["configured"] == 60
+    assert body["applied"] == 65
+    assert body["sink_percent"] == 60
+    assert spawner.argv_matching("pactl", "set-sink-volume") == [
+        ("pactl", "set-sink-volume", "alsa_output.usb-card", "60%")
+    ]
+
+
+async def test_a_pulse_sink_with_no_resolvable_card_reports_the_reason_not_a_level(
+    tmp_path: Path,
+) -> None:
+    """An unmappable sink is ``ok: false`` with a reason, never its own level as the card's.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    async with ConfigStore(tmp_path / "doorbell.db") as seeded:
+        await seeded.set_setting("audio.hardware_volume", 60)
+    backend = _FakeBackend(
+        [AudioDevice(name="pulse/alsa_output.usb-card", hostapi="pulse", is_default=True)]
+    )
+    app, _state = _build_app(
+        tmp_path, backend, hardware_spawner=RecordingSpawner(FakePulse(percent=60))
+    )
+
+    async with _running(app) as client:
+        response = await _get(client, "/api/audio/hardware")
+
+    assert response.status_code == 200
+    body = _body(response)
+    assert body["ok"] is False
+    assert body["available"] is False
+    assert body["percent"] is None
+    assert body["applied"] is None
+    assert body["sink_percent"] == 60
+    assert "alsa_output.usb-card" in cast(str, body["reason"])
 
 
 async def test_the_hardware_route_echoes_the_stored_level(tmp_path: Path) -> None:
@@ -679,9 +754,14 @@ async def test_a_secret_in_a_sink_name_is_scrubbed(tmp_path: Path) -> None:
     backend = _FakeBackend(
         [AudioDevice(name=f"pulse/sink-{_TOKEN}", hostapi="pulse", is_default=True)]
     )
-    app, _state = _build_app(
-        tmp_path, backend, hardware_spawner=RecordingSpawner(FakePulse(percent=100))
+    pulse = FakePulse(
+        percent=100,
+        sink=f"sink-{_TOKEN}",
+        alsa_card="1",
+        alsa_id="Device",
+        mixer=FakeMixer({"Speaker": FakeControl(percent=100)}),
     )
+    app, _state = _build_app(tmp_path, backend, hardware_spawner=RecordingSpawner(pulse))
 
     async with _running(app) as client:
         SECRET_SCRUBBER.set_secrets([_TOKEN])

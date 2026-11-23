@@ -16,6 +16,15 @@ distinction the status keeps is the one that matters: ``available=False`` with
 (HDMI's ``IEC958`` control is a switch, not a volume); "the amixer utility is not
 installed" is a failure to ask at all.
 
+On a PipeWire host the app's write lands on a sink, but the level the speaker
+really reaches is set by the ALSA control behind that sink: ``pactl`` repeats the
+sink's percentage, which is only the request as the sink saw it, while the card
+quantises it (60 becomes 65 on the panel's C-Media codec). A pulse read is
+therefore two stages — the sink's level, then the backing card's own control —
+and the card's level is what the status reports, with the sink's alongside it.
+When a sink cannot be mapped back to a card, that is said rather than papered
+over with the sink's own value.
+
 No subprocess is started except through :mod:`chime_deck.audio.commands`, whose
 spawner is the test seam, and nothing here blocks the event loop.
 
@@ -26,8 +35,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import TYPE_CHECKING, Final
 
 from .backend import AudioBackend
@@ -43,6 +53,7 @@ __all__ = [
     "NO_HARDWARE_CONTROL_TEXT",
     "HardwareVolume",
     "HardwareVolumeStatus",
+    "alsa_card_candidates",
     "card_token",
     "choose_control",
     "has_playback_volume",
@@ -51,6 +62,7 @@ __all__ = [
     "parse_control_names",
     "parse_pactl_mute",
     "parse_pactl_percent",
+    "parse_sink_properties",
     "pulse_sink_name",
 ]
 
@@ -72,6 +84,11 @@ override beats both.
 """
 
 _CARD_PATTERN: Final = re.compile(r"CARD=([\w.-]+)")
+_SINK_HEADER_PATTERN: Final = re.compile(r"^Sink #\d+", re.MULTILINE)
+_SINK_NAME_PATTERN: Final = re.compile(r"^[ \t]+Name: (?P<name>.*)$", re.MULTILINE)
+_SINK_PROPERTY_PATTERN: Final = re.compile(
+    r'^[ \t]+(?P<key>[\w.-]+) = "(?P<value>.*)"$', re.MULTILINE
+)
 _HW_INDEX_PATTERN: Final = re.compile(r"hw:(\d+)")
 _AMIXER_PERCENT_PATTERN: Final = re.compile(r"\[(\d+)%\]")
 _PACTL_PERCENT_PATTERN: Final = re.compile(r"(\d+)%")
@@ -105,6 +122,10 @@ class HardwareVolumeStatus:
     :meth:`HardwareVolume.apply` write reached, taken from the read-back that
     followed the write, and ``None`` when that call wrote nothing — so the
     settings page can show "you asked for 100, the device now says 100".
+    ``sink_percent`` is the Pulse/PipeWire sink's own level, the value the app
+    actually wrote: on that path ``percent`` is what the ALSA control behind the
+    sink reached instead, so the two can differ. It is ``None`` for a direct ALSA
+    target, where ``percent`` already is the written control's level.
     """
 
     available: bool
@@ -114,6 +135,7 @@ class HardwareVolumeStatus:
     muted: bool
     reason: str
     applied: int | None
+    sink_percent: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,11 +164,20 @@ class _Resolution:
 
 @dataclass(frozen=True, slots=True)
 class _Reading:
-    """One read of a control: the percentage, the mute flag and any failure prose."""
+    """One read of a control: the percentages, the mute flag and any failure prose.
+
+    ``percent``/``muted``/``reason`` describe the control the service reads and
+    writes — for a Pulse/PipeWire target that is the sink. ``achieved`` is the
+    level the deeper ALSA control actually reached on that path and
+    ``achieved_reason`` says why it could not be read; the ALSA path leaves both
+    unset, because there its ``percent`` *is* the hardware level.
+    """
 
     percent: int | None
     muted: bool
     reason: str
+    achieved: int | None = None
+    achieved_reason: str = ""
 
 
 def card_token(device_name: str) -> str | None:
@@ -280,6 +311,80 @@ def parse_pactl_mute(mute_output: str) -> bool:
     :return: whether the line reads ``Mute: yes``.
     """
     return "Mute: yes" in mute_output
+
+
+def _sink_blocks(output: str) -> tuple[str, ...]:
+    """Split ``pactl list sinks`` output into one text block per sink.
+
+    A header line (``Sink #59``) opens a block. Output with no header at all is
+    treated as a single block, which is also what a truncated transcript looks
+    like.
+
+    :param output: stdout of ``pactl list sinks``.
+    :return: the blocks, in the order pactl printed them.
+    """
+    starts = [match.start() for match in _SINK_HEADER_PATTERN.finditer(output)]
+    if not starts:
+        return (output,)
+    starts.append(len(output))
+    return tuple(output[start:end] for start, end in pairwise(starts))
+
+
+def parse_sink_properties(list_sinks_output: str, sink: str) -> dict[str, str] | None:
+    """Extract one sink's properties from ``pactl list sinks`` output.
+
+    Each sink is printed as a block with a ``Name:`` line and a ``Properties:``
+    section whose entries are indented twice and quoted. ``None`` means the sink
+    is not listed at all, which is a different fact from ``{}`` — a listed sink
+    that reports no properties.
+
+    :param list_sinks_output: stdout of ``pactl list sinks``.
+    :param sink: the sink name to look for, matched exactly.
+    :return: that sink's ``key`` → unquoted ``value`` mapping, or ``None``.
+    """
+    for block in _sink_blocks(list_sinks_output):
+        name = _SINK_NAME_PATTERN.search(block)
+        if name is None or name.group("name").strip() != sink:
+            continue
+        return {
+            match.group("key"): match.group("value")
+            for match in _SINK_PROPERTY_PATTERN.finditer(block)
+        }
+    return None
+
+
+def alsa_card_candidates(properties: Mapping[str, str]) -> tuple[str, ...]:
+    """Return the ``amixer -c`` tokens that might name a sink's ALSA card.
+
+    The card *id* (``alsa.id``) is preferred because ALSA card indices can
+    reorder across boots, and the numeric index is the always-present fallback.
+    Card *names* are never candidates: ``amixer -c`` rejects a name with
+    ``Invalid card number`` before it attaches. The precedence is a ``CARD=``
+    capture from ``api.alsa.path``, then one from ``api.alsa.card.longname``
+    (older PipeWire prints a PCM name such as ``hw:CARD=Device,DEV=0`` there),
+    then ``alsa.id``, then ``alsa.card``, then ``api.alsa.pcm.card`` and
+    ``api.alsa.card``.
+
+    :param properties: one sink's ``pactl`` properties.
+    :return: the de-duplicated candidate tokens, in the order to try them.
+    """
+    candidates: list[str] = []
+
+    def add(value: str | None) -> None:
+        """Append *value* unless it is blank or already present."""
+        token = "" if value is None else value.strip()
+        if token != "" and token not in candidates:
+            candidates.append(token)
+
+    for key in ("api.alsa.path", "api.alsa.card.longname"):
+        match = _CARD_PATTERN.search(properties.get(key, ""))
+        if match is not None:
+            add(match.group(1))
+    add(properties.get("alsa.id"))
+    add(properties.get("alsa.card"))
+    for key in ("api.alsa.pcm.card", "api.alsa.card"):
+        add(properties.get(key))
+    return tuple(candidates)
 
 
 def _amixer_argv(card: str | None, *arguments: str) -> tuple[str, ...]:
@@ -419,7 +524,11 @@ class HardwareVolume:
         try:
             resolution, reading = await self._probe()
             status = _status_of(resolution, reading, None)
-            if not status.available or resolution.target is None:
+            if resolution.target is None or reading.percent is None:
+                # The guard keys on the control the app WRITES: for a pulse target
+                # that is the sink, and the sink holds exactly the requested 60,
+                # never the 65 the card behind it reached. Keying on the achieved
+                # level instead would re-issue the write on every apply.
                 self._status = status
                 return status
             target_percent = await self._target_percent()
@@ -444,7 +553,7 @@ class HardwareVolume:
                 status = _status_of(resolution, confirmed, None)
                 self._status = status
                 return status
-            self._applied = confirmed.percent
+            self._applied = _achieved(resolution.target, confirmed)
             self._remember_landed(resolution.target, target_percent, confirmed.percent)
             status = _status_of(resolution, confirmed, self._applied)
             self._status = status
@@ -525,32 +634,61 @@ class HardwareVolume:
             target = _MixerTarget(medium="pulse", device=device.name, control=sink, card=None)
             return _Resolution(target, device.name, sink, "")
         card = card_token(device.name)
-        controls_result = await self._run(_amixer_argv(card, "scontrols"))
-        if not controls_result.ok:
-            reason = _failure_reason(controls_result, _AMIXER, "scontrols")
+        controls, reason = await self._list_card_controls(card)
+        if controls is None:
             return _Resolution(None, device.name, None, reason)
-        controls = parse_control_names(controls_result.stdout)
+        control, reason = await self._choose_card_control(controls, card)
+        if control is None:
+            return _Resolution(None, device.name, None, reason)
+        target = _MixerTarget(medium="alsa", device=device.name, control=control, card=card)
+        return _Resolution(target, device.name, control, "")
+
+    async def _list_card_controls(self, card: str | None) -> tuple[tuple[str, ...] | None, str]:
+        """List one card's simple-mixer controls.
+
+        ``None`` means the card did not open, which is a different fact from a
+        card that opened and reported no controls at all: the pulse path uses
+        that distinction to tell "this token is wrong" from "this card cannot be
+        driven".
+
+        :param card: card token from :func:`card_token` or the sink's properties,
+            or ``None`` to let ``amixer`` open the ALSA default.
+        :return: the control names, or ``(None, reason)`` when amixer failed.
+        """
+        result = await self._run(_amixer_argv(card, "scontrols"))
+        if not result.ok:
+            return None, _failure_reason(result, _AMIXER, "scontrols")
+        return parse_control_names(result.stdout), ""
+
+    async def _choose_card_control(
+        self, controls: Sequence[str], card: str | None
+    ) -> tuple[str | None, str]:
+        """Pick the control to drive from one card's control names.
+
+        The stored ``audio.hardware_control`` decides when it names something;
+        otherwise :func:`choose_control` applies the preference order and the
+        playback-volume probe recognises an output whose only control is a switch
+        (the HDMI case).
+
+        :param controls: control names from :meth:`_list_card_controls`.
+        :param card: the card token that listed them.
+        :return: the control name, or ``(None, reason)``.
+        """
         try:
             stored_control = await self._store.get_setting("audio.hardware_control")
         except Exception as exc:
-            reason = f"audio.hardware_control could not be read: {exc}"
-            return _Resolution(None, device.name, None, reason)
+            return None, f"audio.hardware_control could not be read: {exc}"
         explicit = stored_control if isinstance(stored_control, str) else ""
         control = choose_control(controls, explicit)
         if control is not None:
-            target = _MixerTarget(medium="alsa", device=device.name, control=control, card=card)
-            return _Resolution(target, device.name, control, "")
+            return control, ""
         if explicit.strip() != "":
-            reason = f"no control matching {explicit.strip()!r} on this device"
-            return _Resolution(None, device.name, None, reason)
+            return None, f"no control matching {explicit.strip()!r} on this device"
         for candidate in controls:
             probe = await self._run(_amixer_argv(card, "sget", candidate))
             if probe.ok and has_playback_volume(probe.stdout):
-                target = _MixerTarget(
-                    medium="alsa", device=device.name, control=candidate, card=card
-                )
-                return _Resolution(target, device.name, candidate, "")
-        return _Resolution(None, device.name, None, NO_HARDWARE_CONTROL_TEXT)
+                return candidate, ""
+        return None, NO_HARDWARE_CONTROL_TEXT
 
     async def _resolved_device(self, devices: Sequence[AudioDevice]) -> AudioDevice | None:
         """Pick the output mpv is playing through, using the same matcher as playback.
@@ -582,7 +720,7 @@ class HardwareVolume:
         :param target: the control to read.
         """
         if target.medium == "pulse":
-            return await self._read_pulse(target.control)
+            return await self._read_pulse(target)
         result = await self._run(_amixer_argv(target.card, "sget", target.control))
         if not result.ok:
             reason = _failure_reason(result, _AMIXER, f"sget {target.control}")
@@ -593,11 +731,17 @@ class HardwareVolume:
             return _Reading(None, False, reason)
         return _Reading(percent, parse_amixer_muted(result.stdout), "")
 
-    async def _read_pulse(self, sink: str) -> _Reading:
-        """Read a Pulse/PipeWire sink's volume and mute flag.
+    async def _read_pulse(self, target: _MixerTarget) -> _Reading:
+        """Read a Pulse/PipeWire sink and the ALSA control behind it.
 
-        :param sink: sink name from :func:`pulse_sink_name`.
+        The sink's own percentage is what the app wrote, not what the speaker
+        reached, so the backing card is resolved and read too. A sink that
+        cannot be mapped to a card still reads its own level and mute correctly;
+        the mapping failure is carried in ``achieved_reason``.
+
+        :param target: the sink to read; ``control`` is the sink name.
         """
+        sink = target.control
         volume = await self._run(_pactl_argv("get-sink-volume", sink))
         if not volume.ok:
             reason = _failure_reason(volume, _PACTL, f"get-sink-volume {sink}")
@@ -610,7 +754,62 @@ class HardwareVolume:
         if not mute.ok:
             reason = _failure_reason(mute, _PACTL, f"get-sink-mute {sink}")
             return _Reading(None, False, reason)
-        return _Reading(percent, parse_pactl_mute(mute.stdout), "")
+        muted = parse_pactl_mute(mute.stdout)
+        hardware_target, reason = await self._pulse_hardware_target(sink, target.device)
+        if hardware_target is None:
+            return _Reading(percent, muted, "", achieved=None, achieved_reason=reason)
+        hardware_reading = await self._read_target(hardware_target)
+        return _Reading(
+            percent,
+            muted,
+            "",
+            achieved=hardware_reading.percent,
+            achieved_reason=hardware_reading.reason,
+        )
+
+    async def _pulse_hardware_target(
+        self, sink: str, device: str
+    ) -> tuple[_MixerTarget | None, str]:
+        """Find the ALSA control behind a Pulse/PipeWire sink.
+
+        ``pactl`` can set a sink's percentage but cannot say what the card behind
+        it did with it, so the sink's properties are mapped back to an ``amixer``
+        card and its playback control. Each candidate is tried once, in order,
+        with no retry and no polling: the first card that opens decides the
+        answer, either with a control or with the refusal that says why that card
+        cannot be driven.
+
+        :param sink: the sink name the app writes.
+        :param device: the resolved output's mpv name, carried on the target.
+        :return: the ALSA target, or ``(None, reason)`` when no mapping exists.
+        """
+        result = await self._run(_pactl_argv("list", "sinks"))
+        if not result.ok:
+            failure = _failure_reason(result, _PACTL, "list sinks")
+            return None, f"the {sink!r} sink's ALSA card could not be found: {failure}"
+        properties = parse_sink_properties(result.stdout, sink)
+        if properties is None:
+            return None, (
+                f"the {sink!r} sink is not listed by pactl, so the card behind it cannot be found"
+            )
+        candidates = alsa_card_candidates(properties)
+        if not candidates:
+            return None, (
+                f"the {sink!r} sink reports no ALSA card, so the level the card reached "
+                "cannot be read"
+            )
+        last_reason = ""
+        for card in candidates:
+            controls, reason = await self._list_card_controls(card)
+            if controls is None:
+                last_reason = reason
+                continue
+            control, refusal = await self._choose_card_control(controls, card)
+            if control is None:
+                return None, f"{refusal} (the card behind the {sink!r} sink)"
+            target = _MixerTarget(medium="alsa", device=device, control=control, card=card)
+            return target, ""
+        return None, f"the card behind the {sink!r} sink could not be read: {last_reason}"
 
     async def _write(self, target: _MixerTarget, percent: int) -> str:
         """Set one resolved control, clearing its mute in the same step.
@@ -664,23 +863,48 @@ def _target_identity(target: _MixerTarget) -> tuple[str, str, str]:
     return (target.medium, target.device, target.control)
 
 
+def _achieved(target: _MixerTarget, reading: _Reading) -> int | None:
+    """Return the level the hardware stage reached, from one reading.
+
+    A pulse target's own ``percent`` is the sink, which only saw the request, so
+    its reached level is the deeper ALSA read; an ALSA target's ``percent`` is the
+    hardware level itself.
+
+    :param target: the resolved control that produced the reading.
+    :param reading: what that control reported.
+    :return: the reached percentage, or ``None`` when it could not be read.
+    """
+    return reading.achieved if target.medium == "pulse" else reading.percent
+
+
 def _status_of(
     resolution: _Resolution, reading: _Reading, applied: int | None
 ) -> HardwareVolumeStatus:
     """Assemble a status from one resolution and one reading.
 
+    The reason precedence is the reading's own failure, then (on the pulse path)
+    why the card behind the sink could not be read, then the resolution's reason
+    — so the most specific fact about what went wrong is the one the user sees.
+
     :param resolution: what the output resolved to.
     :param reading: what the control reported.
     :param applied: percent the last :meth:`HardwareVolume.apply` wrote, if any.
     """
-    available = resolution.target is not None and reading.percent is not None
-    reason = "" if available else (reading.reason or resolution.reason)
+    target = resolution.target
+    pulse = target is not None and target.medium == "pulse"
+    percent = None if target is None else _achieved(target, reading)
+    available = target is not None and percent is not None
+    if available:
+        reason = ""
+    else:
+        reason = reading.reason or (reading.achieved_reason if pulse else "") or resolution.reason
     return HardwareVolumeStatus(
         available=available,
         device=resolution.device,
         control=resolution.control,
-        percent=reading.percent,
+        percent=percent,
         muted=reading.muted,
         reason=reason,
         applied=applied if available else None,
+        sink_percent=reading.percent if pulse else None,
     )

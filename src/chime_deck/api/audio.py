@@ -12,6 +12,13 @@ settings ask for (``configured``) and the level the last apply really wrote
 (``applied``). Showing both in one response is the point: the original bug was a
 UI that said 100% while the DAC said 43%.
 
+On a Pulse/PipeWire output the app writes a sink, but the level the speaker
+really reaches is set by the ALSA control behind it, so ``percent`` and
+``applied`` are that control's level and ``sink_percent`` is the sink's own
+level, the value the app wrote. When the sink cannot be mapped back to a card
+the route reports ``available: false`` with the sentence saying so and
+``percent: null`` — never the sink level dressed up as the card's.
+
 The route owns no device logic: :meth:`AudioBackend.list_devices` is the same
 call the playback worker's backend uses, and
 :func:`~chime_deck.audio.resolve_device` is the same matcher the backend
@@ -124,9 +131,16 @@ class HardwareVolumeResponse(BaseModel):
     ``audio.hardware_volume`` — the request — so the panel can show "you asked for
     100, the device says 43" in one glance; it is never overwritten with a
     read-back and never rounded. ``applied`` is the level the last write of this
-    process reached, or ``None`` when that call wrote nothing. ``ok`` is false only
-    when the route could not get an answer at all: an output with no hardware
-    volume control is an answer and reports ``available: false`` with its reason.
+    process reached, or ``None`` when that call wrote nothing.
+
+    On a Pulse/PipeWire output ``percent`` and ``applied`` are the level of the
+    ALSA control behind the sink — what the speaker really reached — and
+    ``sink_percent`` is the sink's own level, the value the app wrote. When that
+    mapping cannot be resolved the response is ``available: false`` with the
+    sentence saying why and ``percent: null``, never the sink level as if it were
+    the card's. ``ok`` is false only when the route could not get an answer at
+    all: an output with no hardware volume control is an answer and reports
+    ``available: false`` with its reason.
     """
 
     ok: bool
@@ -138,6 +152,7 @@ class HardwareVolumeResponse(BaseModel):
     reason: str = ""
     configured: int | None = None
     applied: int | None = None
+    sink_percent: int | None = None
 
 
 class AudioDevicesResponse(BaseModel):
@@ -275,6 +290,7 @@ def build_audio_router(state: AppState) -> APIRouter:
             reason=_scrub(status.reason),
             configured=stored if isinstance(stored, int) and not isinstance(stored, bool) else None,
             applied=status.applied,
+            sink_percent=status.sink_percent,
         )
 
     return router

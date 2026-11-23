@@ -5,7 +5,9 @@ never executes ``amixer`` or ``pactl`` (AGENTS.md HARD RULE 4); the fake mixer
 below answers the same shapes a real one prints. The load-bearing test is
 :func:`test_applied_comes_from_the_read_back_not_from_the_request`: the panel
 must show what the device says, so ``applied`` is taken from a second read and
-never from the percentage the app asked for.
+never from the percentage the app asked for. Its Pulse twin,
+:func:`test_a_pulse_write_reports_the_level_the_card_reached`, pins the same rule
+for a sink whose backing card quantises the level the sink repeated.
 
 Owning ticket: cd-qul9.
 """
@@ -18,7 +20,14 @@ from typing import cast
 
 import pytest
 import pytest_asyncio
-from audio_hardware_fakes import FakeCommand, FakeControl, FakeMixer, FakePulse, RecordingSpawner
+from audio_hardware_fakes import (
+    FakeCommand,
+    FakeControl,
+    FakeMixer,
+    FakePulse,
+    RecordingSpawner,
+    pulse_with_card,
+)
 
 from chime_deck.audio import (
     HARDWARE_NOT_STARTED_TEXT,
@@ -28,6 +37,7 @@ from chime_deck.audio import (
 )
 from chime_deck.audio.hardware import (
     NO_HARDWARE_CONTROL_TEXT,
+    alsa_card_candidates,
     card_token,
     choose_control,
     has_playback_volume,
@@ -36,6 +46,7 @@ from chime_deck.audio.hardware import (
     parse_control_names,
     parse_pactl_mute,
     parse_pactl_percent,
+    parse_sink_properties,
     pulse_sink_name,
 )
 from chime_deck.store import ConfigStore
@@ -279,6 +290,77 @@ async def test_the_pactl_percentage_and_mute_are_parsed() -> None:
     assert parse_pactl_mute("Mute: no\n") is False
 
 
+async def test_a_sinks_properties_are_read_from_the_listing_that_names_it() -> None:
+    """Properties are per sink: another sink's are not returned, an unlisted sink is ``None``."""
+    listing = (
+        "Sink #0\n"
+        "\tState: SUSPENDED\n"
+        "\tName: alsa_output.first\n"
+        "\tDescription: First\n"
+        "\tProperties:\n"
+        '\t\tdevice.api = "alsa"\n'
+        '\t\talsa.card = "1"\n'
+        "Sink #1\n"
+        "\tState: RUNNING\n"
+        "\tName: alsa_output.second\n"
+        "\tDescription: Second\n"
+        "\tProperties:\n"
+        '\t\tdevice.api = "alsa"\n'
+        '\t\talsa.id = "Device"\n'
+        '\t\tapi.alsa.path = "hw:CARD=Device,DEV=0"\n'
+        "Sink #2\n"
+        "\tState: IDLE\n"
+        "\tName: alsa_output.third\n"
+        "\tDescription: A sink with nothing to declare\n"
+    )
+
+    properties = parse_sink_properties(listing, "alsa_output.second")
+
+    assert properties == {
+        "device.api": "alsa",
+        "alsa.id": "Device",
+        "api.alsa.path": "hw:CARD=Device,DEV=0",
+    }
+    assert properties is not None
+    assert "alsa.card" not in properties
+    assert parse_sink_properties(listing, "alsa_output.first") == {
+        "device.api": "alsa",
+        "alsa.card": "1",
+    }
+    assert parse_sink_properties(listing, "alsa_output.third") == {}
+    assert parse_sink_properties(listing, "alsa_output.absent") is None
+
+
+@pytest.mark.parametrize(
+    ("properties", "expected"),
+    [
+        (
+            {"api.alsa.path": "hw:CARD=Device,DEV=0", "alsa.id": "Device", "alsa.card": "1"},
+            ("Device", "1"),
+        ),
+        ({"api.alsa.card.longname": "HDA Intel PCH at 0x0 hw:CARD=PCH,DEV=0"}, ("PCH",)),
+        ({"alsa.id": "Device", "alsa.card": "1"}, ("Device", "1")),
+        ({"alsa.card": "0"}, ("0",)),
+        ({"api.alsa.pcm.card": "2", "api.alsa.card": "2"}, ("2",)),
+        ({"api.alsa.card.name": "Fake Card", "alsa.card_name": "Fake Card"}, ()),
+        ({}, ()),
+    ],
+)
+async def test_the_card_candidates_prefer_the_id_and_never_a_card_name(
+    properties: Mapping[str, str], expected: tuple[str, ...]
+) -> None:
+    """``amixer -c`` takes an index or a card id, so a card *name* is never offered.
+
+    ``api.alsa.path`` names the ``CARD=`` token most directly, the id cannot
+    reorder across boots the way an index can, and a name that only
+    ``api.alsa.card.name`` carries would be rejected before amixer attached.
+
+    :param properties: one sink's ``pactl`` properties.
+    :param expected: the candidate tokens, in the order they are tried.
+    """
+    assert alsa_card_candidates(properties) == expected
+
+
 async def test_an_alsa_device_is_read_with_its_card_argument(store: ConfigStore) -> None:
     """The read drives ``scontrols`` then ``sget`` on the resolved card."""
     mixer = FakeMixer({"Speaker": FakeControl(percent=43)})
@@ -324,9 +406,9 @@ async def test_the_alsa_default_device_has_no_card_argument(store: ConfigStore) 
 
 
 async def test_a_pulse_sink_is_driven_with_pactl(store: ConfigStore) -> None:
-    """A PipeWire/Pulse output reads and writes through ``pactl``, not amixer."""
+    """A PipeWire/Pulse output is written through ``pactl`` and read through both tools."""
     backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
-    pulse = FakePulse(percent=40)
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=43)})
     spawner = RecordingSpawner(pulse)
 
     status = await _service(store, spawner, backend).read()
@@ -334,10 +416,198 @@ async def test_a_pulse_sink_is_driven_with_pactl(store: ConfigStore) -> None:
     assert spawner.calls == [
         ("pactl", "get-sink-volume", "alsa_output.usb-card"),
         ("pactl", "get-sink-mute", "alsa_output.usb-card"),
+        ("pactl", "list", "sinks"),
+        ("amixer", "-c", "Device", "scontrols"),
+        ("amixer", "-c", "Device", "sget", "Speaker"),
     ]
     assert status.available is True
     assert status.control == "alsa_output.usb-card"
-    assert status.percent == 40
+    assert status.percent == 43
+    assert status.sink_percent == 40
+
+
+async def test_a_pulse_write_reports_the_level_the_card_reached(store: ConfigStore) -> None:
+    """The money case: ``pactl`` takes the request, the card behind the sink answers.
+
+    The stored 60 is written to the sink, but the panel's C-Media card turns it
+    into 65. ``percent`` and ``applied`` are that 65 — the level the speaker
+    really reached — while ``sink_percent`` keeps the sink's own 60, and the
+    command that ran still asked for 60%.
+    """
+    await store.set_setting("audio.hardware_volume", 60)
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=43, write_percent=65)})
+    spawner = RecordingSpawner(pulse)
+
+    status = await _service(store, spawner, backend).apply()
+
+    assert status.available is True
+    assert status.percent == 65
+    assert status.applied == 65
+    assert status.sink_percent == 60
+    assert status.muted is False
+    assert status.control == "alsa_output.usb-card"
+    assert spawner.argv_matching("pactl", "set-sink-volume") == [
+        ("pactl", "set-sink-volume", "alsa_output.usb-card", "60%")
+    ]
+    assert await store.get_setting("audio.hardware_volume") == 60
+    assert pulse.mixer is not None
+    assert pulse.mixer.writes == []
+
+
+async def test_a_pulse_sink_whose_card_cannot_be_resolved_never_reports_the_sink_level(
+    store: ConfigStore,
+) -> None:
+    """A sink with no ALSA properties is a sentence, not the sink's own 60% dressed as one."""
+    await store.set_setting("audio.hardware_volume", 60)
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    service = _service(store, RecordingSpawner(FakePulse(percent=60)), backend)
+
+    applied_status = await service.apply()
+    read_status = await service.read()
+
+    for status in (applied_status, read_status):
+        assert status.available is False
+        assert status.percent is None
+        assert status.applied is None
+        assert status.sink_percent == 60
+        assert status.percent != 60
+        assert "alsa_output.usb-card" in status.reason
+        assert "no ALSA card" in status.reason
+
+
+async def test_an_unresolvable_pulse_sink_is_still_written_but_not_confirmed(
+    store: ConfigStore,
+) -> None:
+    """An unmappable sink is still set: failing to confirm the card is not failing to set the sink.
+
+    The status reports the level as unknown, so a write that did happen is never
+    silently dropped just because the deeper ALSA read cannot be confirmed.
+    """
+    await store.set_setting("audio.hardware_volume", 60)
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = FakePulse(percent=40)
+    spawner = RecordingSpawner(pulse)
+
+    status = await _service(store, spawner, backend).apply()
+
+    assert pulse.writes == [
+        ("set-sink-volume", "alsa_output.usb-card", "60%"),
+        ("set-sink-mute", "alsa_output.usb-card", "0"),
+    ]
+    assert spawner.argv_matching("pactl", "set-sink-volume") == [
+        ("pactl", "set-sink-volume", "alsa_output.usb-card", "60%")
+    ]
+    assert status.available is False
+    assert status.percent is None
+    assert status.applied is None
+    assert status.sink_percent == 60
+    assert "alsa_output.usb-card" in status.reason
+    assert await store.get_setting("audio.hardware_volume") == 60
+
+
+async def test_a_pulse_target_already_at_the_achieved_level_is_not_written_again(
+    store: ConfigStore,
+) -> None:
+    """The sink holds the request, so the second apply writes nothing and invents no ``applied``."""
+    await store.set_setting("audio.hardware_volume", 60)
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=43, write_percent=65)})
+    service = _service(store, RecordingSpawner(pulse), backend)
+
+    await service.apply()
+    second = await service.apply()
+
+    assert pulse.writes == [
+        ("set-sink-volume", "alsa_output.usb-card", "60%"),
+        ("set-sink-mute", "alsa_output.usb-card", "0"),
+    ]
+    assert second.percent == 65
+    assert second.applied is None
+
+
+async def test_the_card_id_is_tried_before_the_numeric_index(store: ConfigStore) -> None:
+    """ALSA indices reorder across boots, so the id is offered first and the index second."""
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=43)})
+    pulse.mixer = FakeMixer({"Speaker": FakeControl(percent=43)}, valid_cards=frozenset({"1"}))
+    spawner = RecordingSpawner(pulse)
+
+    status = await _service(store, spawner, backend).read()
+
+    assert spawner.argv_matching("amixer", "scontrols") == [
+        ("amixer", "-c", "Device", "scontrols"),
+        ("amixer", "-c", "1", "scontrols"),
+    ]
+    assert status.available is True
+    assert status.percent == 43
+
+
+async def test_a_card_that_reports_no_playback_control_is_an_answer(store: ConfigStore) -> None:
+    """The HDMI case behind a sink: switch-only card, ``available: false`` with a reason."""
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = pulse_with_card(60, {"IEC958": FakeControl(percent=0, has_volume=False)})
+
+    status = await _service(store, RecordingSpawner(pulse), backend).read()
+
+    assert status.available is False
+    assert status.percent is None
+    assert status.sink_percent == 60
+    assert status.reason.startswith(NO_HARDWARE_CONTROL_TEXT)
+    assert "alsa_output.usb-card" in status.reason
+
+
+async def test_a_card_amixer_cannot_list_is_reported_with_its_own_words(
+    store: ConfigStore,
+) -> None:
+    """A card pactl names but ALSA cannot attach is quoted, not guessed at."""
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = FakePulse(percent=60, alsa_card="1")
+
+    def _handler(argv: tuple[str, ...]) -> FakeCommand:
+        if argv[0] == "amixer":
+            return FakeCommand(
+                returncode=1, stderr="amixer: Mixer attach hw:1 error: No such device"
+            )
+        return pulse(argv)
+
+    status = await _service(store, RecordingSpawner(_handler), backend).read()
+
+    assert status.available is False
+    assert status.percent is None
+    assert status.sink_percent == 60
+    assert "amixer scontrols failed" in status.reason
+    assert "No such device" in status.reason
+    assert "alsa_output.usb-card" in status.reason
+
+
+async def test_a_stored_control_that_matches_nothing_behind_the_sink_is_reported(
+    store: ConfigStore,
+) -> None:
+    """A wrong manual control name is visible, and says it was the card behind the sink."""
+    await store.set_setting("audio.hardware_control", "Nope")
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=43)})
+
+    status = await _service(store, RecordingSpawner(pulse), backend).read()
+
+    assert status.available is False
+    assert status.reason.startswith("no control matching 'Nope'")
+    assert "alsa_output.usb-card" in status.reason
+
+
+async def test_a_pulse_sink_that_pactl_does_not_list_is_reported(store: ConfigStore) -> None:
+    """A sink pactl will not list has no discoverable card, and the status says so."""
+    backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
+    pulse = FakePulse(percent=40, listed=False)
+
+    status = await _service(store, RecordingSpawner(pulse), backend).read()
+
+    assert status.available is False
+    assert status.percent is None
+    assert status.sink_percent == 40
+    assert "alsa_output.usb-card" in status.reason
+    assert "not listed by pactl" in status.reason
 
 
 async def test_the_device_mpv_would_default_to_is_used_when_the_hint_is_blank(
@@ -654,7 +924,7 @@ async def test_mute_targets_zero_and_unmute_restores_the_stored_value(
 async def test_a_pulse_write_sets_the_volume_then_unmutes(store: ConfigStore) -> None:
     """The sink is raised and unmuted by two bounded ``pactl`` commands."""
     backend = _Backend([AudioDevice(name=_PULSE_DEVICE, hostapi="pulse", is_default=True)])
-    pulse = FakePulse(percent=40, muted=True)
+    pulse = pulse_with_card(40, {"Speaker": FakeControl(percent=100)}, muted=True)
     spawner = RecordingSpawner(pulse)
 
     status = await _service(store, spawner, backend).apply()
@@ -665,6 +935,7 @@ async def test_a_pulse_write_sets_the_volume_then_unmutes(store: ConfigStore) ->
     ]
     assert status.percent == 100
     assert status.applied == 100
+    assert status.sink_percent == 100
 
 
 async def test_a_missing_utility_is_reported_as_not_installed(store: ConfigStore) -> None:
