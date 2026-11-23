@@ -789,10 +789,10 @@ async def test_mute_outranks_quiet_hours(
     result = await service.press(button.slug)
 
     assert result.outcome is PressOutcome.SUPPRESSED_MUTED
-    assert result.outcome is not PressOutcome.SUPPRESSED_QUIET_HOURS
     assert dispatcher.jobs == []
     rows = await store.recent_presses()
     assert len(rows) == 1
+    assert rows[0].outcome == "suppressed_muted"
     assert rows[0].detail is not None
     assert "mute" in rows[0].detail
     assert "quiet hours" not in rows[0].detail

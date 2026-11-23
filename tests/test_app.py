@@ -632,7 +632,11 @@ async def test_ha_configured_after_startup_starts_watching_without_a_restart(
     caplog.set_level(logging.INFO, logger="chime_deck")
 
     async with app.router.lifespan_context(app):
-        assert state.ha_websocket is None
+        # Read the attribute into a local: asserting on the member itself narrows it for the
+        # rest of the block, so the post-configuration ``is not None`` below would read as
+        # unreachable even though the client really is created when the settings arrive.
+        client_at_startup = state.ha_websocket
+        assert client_at_startup is None
         assert state.health.get("ha") is HealthStatus.NOT_CONFIGURED
         assert state.live_entities is NO_LIVE_ENTITY_INFO
         assert len(_ha_steps(caplog)) == 1
@@ -877,7 +881,10 @@ async def test_shutdown_closes_the_home_assistant_client(
 
     async with app.router.lifespan_context(app):
         await wait_until(lambda: client.connected, timeout=5.0)
-        assert client.connected is True
+        # Same reason as above: asserting on ``client.connected`` itself narrows it to True for
+        # the rest of the function, so the post-shutdown ``is False`` would read as unreachable.
+        connected_before_shutdown = client.connected
+        assert connected_before_shutdown is True
 
     assert state.ha_websocket is client
     assert client.connected is False

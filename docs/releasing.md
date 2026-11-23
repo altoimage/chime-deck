@@ -187,7 +187,7 @@ Nothing is published until all of this is green, in this order:
 
 | Job | Proves |
 | --- | --- |
-| `checks` | `ruff check`, `ruff format --check`, `mypy src`, `pytest` — the same four commands `AGENTS.md` lists |
+| `checks` | `ruff check`, `ruff format --check`, `mypy`, `pytest` — the same four commands `AGENTS.md` lists |
 | `frontend` | `npm run verify` (types, contrast, gallery, storyboard, unit tests, build, bundle checks) and `npm run check:dist-stale` (the committed bundle is the one this source produces) |
 | `wheel` | `uv build`, then `chime_deck/static/index.html` is listed inside the wheel, then **an installed copy serves the dashboard**: a clean `uv venv`, install the wheel, boot the server from `site-packages` and assert `/` returns the app shell and `/assets/...` resolves |
 | `images` | Both targets build for amd64 **and** arm64, and are pushed |

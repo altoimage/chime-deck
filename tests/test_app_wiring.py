@@ -634,7 +634,7 @@ def _published_payloads(events: list[tuple[object, ...]], topic: str) -> list[Ma
     :param topic: topic to filter on.
     """
     return [
-        cast("Mapping[str, object]", json.loads(cast(str, event[2])))
+        cast("Mapping[str, object]", json.loads(event[2]))
         for event in events
         if event[0] == "publish" and event[1] == topic and isinstance(event[2], str) and event[2]
     ]

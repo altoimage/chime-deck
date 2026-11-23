@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -716,11 +716,18 @@ async def test_a_press_still_presses_and_is_never_a_selection_command(
     await wait_until(lambda: harness.press.calls != [])
     assert harness.press.calls == [(PRESS_BUTTON_SLUG, "mqtt")]
 
+    def _republished_since(mark: int) -> Callable[[], bool]:
+        """Return a predicate that fires once a publish newer than *mark* is seen.
+
+        :param mark: number of state publishes taken before the press.
+        """
+        return lambda: len(_published(harness, STATE_TOPIC)) > mark
+
     harness.press.calls.clear()
     for payload in (b"press", b"ON"):
         mark = len(_published(harness, STATE_TOPIC))
         harness.broker.publish_from_test(COMMAND_TOPIC, payload)
-        await wait_until(lambda mark=mark: len(_published(harness, STATE_TOPIC)) > mark)
+        await wait_until(_republished_since(mark))
     assert harness.press.calls == []
     assert harness.selection.is_selected(LOCK) is False
 
