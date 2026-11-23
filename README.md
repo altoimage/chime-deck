@@ -3,7 +3,7 @@
 A small, self-hosted chime-and-status panel for [Home Assistant](https://www.home-assistant.io/).
 
 It runs on the cheap Linux box you already want by the door — a Raspberry Pi, an old
-NUC, a thin client — and does two simple jobs:
+NUC, a thin client — and does three simple jobs:
 
 1. **Shows the state of things you care about.** A few large, colourful tiles: is the
    front door locked, is the garage open, what is the temperature in the kitchen.
@@ -11,6 +11,10 @@ NUC, a thin client — and does two simple jobs:
    `button` entity for each chime you configure. Press the button (from an automation,
    a dashboard, a physical button, anything) and this device plays the sound — or
    speaks the sentence — that you chose.
+3. **Lets you point at it.** Tap a tile and it becomes a `switch` in Home Assistant, meaning
+   *"this is the thing I care about right now"*. Your automation can watch that switch, ring a
+   chime, and clear it again — so the policy lives in Home Assistant and the panel only ever
+   records intent.
 
 Think "video doorbell chime, but for every event in my house".
 
@@ -89,8 +93,8 @@ The sound always comes out of the panel — that is the one thing that never mov
 ## Quick start
 
 ```bash
-git clone <this repo>
-cd chime_deck
+git clone https://github.com/insanemal/chime-deck
+cd chime-deck
 
 # system packages (Debian / Raspberry Pi OS)
 sudo apt install libmpv2 libportaudio2 ffmpeg espeak-ng
@@ -98,6 +102,32 @@ sudo apt install libmpv2 libportaudio2 ffmpeg espeak-ng
 uv sync
 uv run chime-deck          # serves http://127.0.0.1:8080
 ```
+
+### The two listeners
+
+ChimeDeck binds **two** things, and the difference matters:
+
+| Listener | Default | Serves |
+| --- | --- | --- |
+| app | `127.0.0.1:8080` | everything: the dashboard the kiosk shows, the API, the live websocket |
+| admin | `0.0.0.0:8081` | configuration only — `/` redirects to `/settings` |
+
+The dashboard is deliberately **loopback-only**: it carries no authentication, because a wall
+display cannot log in, so it must never be reachable from the network. The admin listener is the
+one you open from your phone or laptop to configure the panel, and it asks for a password once you
+have set one. If your Home Assistant is on another machine, that is the page you use.
+
+First run, open the admin listener and the wizard asks for what it needs — your Home Assistant URL
+and token, and your MQTT broker — then picks the tiles and chimes you want. Nothing needs a config
+file. A few CC0 demo sounds ship so the first press makes a noise; replace them with your own.
+
+```bash
+curl -fsS http://127.0.0.1:8080/api/health     # the app is up
+```
+
+The frontend is complete and ships with it: the built bundle is committed in `web/dist/`, so a
+fresh clone needs no Node.js, and the dashboard, settings screens and first-run wizard are all
+served from the same process.
 
 ### Rendering speech on another machine
 
@@ -109,14 +139,9 @@ running the server role against the same `--data-dir`, then put the same value i
 `tts.remote_tts.url`, and choose `remote_tts` as the speech engine. That token is its only
 authentication, so never port-forward it.
 
-The frontend ships in two stages. The **design tokens and component kit have landed** (the
-built bundle is committed in `web/dist/`, so a fresh clone needs no Node.js), but the
-dashboard and settings screens do not exist yet: `/` currently serves a calm "under
-construction" page built from the kit. The screens arrive in later frontend tickets. Until
-then, start the server and check `curl -fsS http://127.0.0.1:8080/api/health` (see
-docs/installing.md §5).
+### Working on the UI
 
-Working on the UI: `cd web && npm ci && npm run dev`, and open `/gallery` for the component
+`cd web && npm ci && npm run dev`, and open `/gallery` for the component
 gallery (dev server only — it is tree-shaken out of the production bundle). `npm run build`
 writes `web/dist/`, and `npm run verify` runs every frontend check (types, WCAG contrast for
 both themes, gallery coverage, build, bundle checks).
@@ -144,6 +169,8 @@ host-specific:
   know which owner you pull from. The release workflow publishes multi-arch (`amd64` +
   `arm64`) images to `ghcr.io/<owner>/chime-deck` on every `v*` tag — see
   [releasing.md](docs/releasing.md) for the tag list and how to point the compose file at one.
+  No release has been tagged yet, so those images are a verified capability rather than something
+  you can pull today; the compose file builds from your checkout.
 
 **The kiosk browser cannot live in the container.** Chromium needs the host's display, seat
 and DRM devices, so run the kiosk on the host ([kiosk.md](docs/kiosk.md)) and point it at
@@ -154,13 +181,15 @@ behind them are in `Project_state/design/06-deployment.md` §6.
 
 ## Testing
 
-Three tiers, and every result should say which one it came from.
+Five tiers, and every result should say which one it came from.
 
 | Tier | Command | Runs where | Proves |
 | --- | --- | --- | --- |
 | Unit | `uv run pytest -q` | your machine | logic, parsing, error paths — everything stubbed, offline, seconds |
 | Integration | `./scripts/test-integration.sh` | a container | real `espeak-ng`, real `libmpv`, real `ffmpeg`, real file handling, ~1 minute |
 | aarch64 | `./scripts/test-integration.sh --board` | the ARM board | the same on the target architecture and CPU |
+| Frontend | `cd web && npm run verify` | your machine | types, WCAG contrast in both themes, gallery and storyboard coverage, component tests, build, and that the committed `web/dist` is byte-identical to a fresh build |
+| Browser | `cd web && npm run test:browser` | your machine | the real UI in a real browser against a real backend: taps, the control rail, settings, selection round trips |
 
 ```bash
 uv run pytest -q                           # unit tier, no system packages needed
@@ -169,6 +198,8 @@ uv run pytest -q -m integration            # only the integration tests (skips w
 ./scripts/test-integration.sh -- -k audio  # pass arguments through to pytest
 ./scripts/test-integration.sh --board      # rsync the tree to the board and run it there
 ./scripts/test-integration.sh --arm64-image  # arm64 correctness under QEMU, no timing claims
+cd web && npm ci && npm run verify         # every frontend check, including check-dist
+cd web && npm run test:browser             # Playwright; run it twice, timing bugs hide on the first run
 ```
 
 The board workflow is the two steps the script automates, per design 07 §6:
@@ -178,8 +209,9 @@ installed for the audio-format tier.
 
 Two honest limits, from design 07 §3. The container plays to `--ao=null`, so "it plays"
 means "it decoded and played to a null sink" — never audible output — and a container has
-no systemd or PipeWire user session. The board is real aarch64 but has a single HDMI sink,
-so "played" there still is not "heard". The full reference is
+no systemd or PipeWire user session. The board is real aarch64 playing to real sinks, but a
+"played" outcome there still is not "heard": only a person in the room can confirm that, which is
+why audible acceptance is a separate, owner-assisted tier rather than a test. The full reference is
 `Project_state/design/07-testing.md`.
 
 ## Where things live
@@ -188,7 +220,7 @@ so "played" there still is not "heard". The full reference is
 | --- | --- |
 | `src/chime_deck/` | Python backend (FastAPI, MQTT bridge, audio engine, TTS) |
 | `tests/` | pytest suite (unit, integration and slow markers) |
-| `web/` | Svelte 5 frontend; tokens and component kit built, screens in progress (the built bundle is committed in `web/dist/`) |
+| `web/` | Svelte 5 frontend: dashboard, control rail, settings and first-run wizard; the built bundle is committed in `web/dist/` |
 | `deploy/` | systemd user units (`chime-deck.service`, `chime-deck-kiosk.service`), the kiosk wrapper and its autostart entry, and the Docker compose file (`docker-compose.yml`) |
 | `docs/` | Operator guides: [`installing.md`](docs/installing.md), [`home-assistant.md`](docs/home-assistant.md), [`kiosk.md`](docs/kiosk.md), [`releasing.md`](docs/releasing.md) |
 | `Dockerfile` | Multi-stage build from the repo root: the product image, the `:piper` tag and the integration harness, all from one file |
@@ -197,8 +229,16 @@ so "played" there still is not "heard". The full reference is
 
 ## Status
 
-Early development. The architecture and design decisions are settled; the build is being
-tracked as tickets. See `tk list` in the repository root.
+**Working and in daily use.** The features above are implemented, tested and running on a real
+panel: tiles, selectable switches, chime buttons, MQTT discovery, the Home Assistant REST and
+websocket clients, the audio engine, five TTS engines, quiet hours, the dashboard and settings
+UI, systemd units, the kiosk wrapper, the Docker build and the release workflow (dry-run
+verified; no tag cut yet).
+
+What is left on the backlog is polish and hardware reach — high-DPI scaling, an all-in-one
+flashable image — not missing core functionality. Two honest limits: the reference panel has been
+verified by one person's ears, not a lab, and the container and aarch64 test tiers can prove a
+sound *decoded and played*, never that it was *heard* (see Testing below).
 
 ## Licence
 
