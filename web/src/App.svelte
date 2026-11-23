@@ -162,7 +162,7 @@
   .shell {
     /* Only ever mounted on the dashboard route: the panel owns the viewport,
        so the page itself never scrolls (the content area has its own scroller). */
-    height: 100dvh;
+    height: var(--viewport-height);
     min-height: 0;
     overflow: hidden;
     display: flex;

@@ -12,7 +12,8 @@
  *     --tap-primary:56px (custom properties survive minification)
  *   - the built CSS keeps the dashboard grid: a counted auto-fit
  *     grid-template-columns carrying the --tiles-columns property and the
- *     240px track floor, with grid-auto-rows:1fr in the same rule
+ *     240px track floor, with grid-auto-rows:minmax(var(--tap-primary),1fr) in
+ *     the same rule — the vertical fill floored at the D26 tap size
  *   - no absolute filesystem path (e.g. /home/) in any dist file — the tree
  *     must be relocatable
  *   - the gallery sentinel (GALLERY_DEV_ONLY_SENTINEL, which Phase 2's
@@ -131,9 +132,19 @@ report(
   gridColumns !== null && gridColumns[0].includes('var(--tiles-columns'),
   'built CSS keeps the --tiles-columns count inside that grid-template-columns'
 );
+// The row floor is part of the contract, not decoration: `1fr` alone is
+// `minmax(auto, 1fr)`, and `.tile` sets `min-height: 0`, so a grid needing more
+// rows than the panel has height for collapses them below D26's tap size and
+// each `.card` — `min-height: var(--tap-primary)` — overflows its own tile.
+// `minmax(var(--tap-primary), 1fr)` makes `.content`'s scroller the valve
+// instead. Without this the layout silently goes back to clipped cards.
+const GRID_ROW_FLOOR = /grid-auto-rows\s*:\s*minmax\(\s*var\(\s*--tap-primary\s*\)\s*,\s*1fr\s*\)/;
+const gridRowFloor = gridBody === null ? null : GRID_ROW_FLOOR.exec(gridBody);
 report(
-  gridBody !== null && /grid-auto-rows\s*:\s*1fr\b/.test(gridBody),
-  'built CSS keeps grid-auto-rows:1fr in the same rule (the vertical fill)'
+  gridRowFloor !== null,
+  `built CSS keeps grid-auto-rows:minmax(var(--tap-primary),1fr) in the same rule ` +
+    `(the vertical fill, floored at the D26 tap size): ` +
+    `${gridRowFloor ? gridRowFloor[0] : 'grid-auto-rows:minmax(var(--tap-primary),1fr) not found'}`
 );
 
 // Lightning CSS rewrites `(max-width: 639px)` to `(width<=639px)` in the

@@ -668,7 +668,7 @@
 
 <style>
   .wizard {
-    min-height: 100dvh;
+    min-height: var(--viewport-height);
     background: var(--bg);
     color: var(--text);
   }
@@ -695,7 +695,7 @@
     flex-direction: column;
     gap: var(--gap);
     width: min(100%, 720px);
-    min-height: 100dvh;
+    min-height: var(--viewport-height);
     margin-inline: auto;
     padding: var(--shell-pad);
     padding-bottom: calc(var(--tap-primary) + env(safe-area-inset-bottom));

@@ -1,6 +1,7 @@
 <!--
   The Appearance section (design 05 §2.2, storyboard S18 F1/F4/F7/F8): this
-  installation's theme, accent, dashboard columns and three dashboard switches.
+  installation's theme, accent, interface scale, dashboard columns and three
+  dashboard switches.
 
   The panel owns the runtime half of the accent-contrast obligation `tokens.css`
   assigns to this ticket: it measures the candidate accent against the ink the
@@ -12,6 +13,10 @@
   drawn with, and its caption names the count in words — nothing is ever
   signalled by colour alone, and the preview never edits anything.
 
+  The scale specimen is a preview in exactly the same sense, and it carries the
+  real `[data-ui-scale]` attribute itself so the tokens' own rules (zoom plus
+  the tap floors) draw it: the preview cannot drift from the panel it describes.
+
   Nothing is applied until the echo: the theme is written by the store's
   `#apply` when the PATCH resolves, so a refused value can never leave the page
   painted with a setting the server did not store. The accent is stored and read
@@ -21,6 +26,7 @@
 <script lang="ts">
   import { DEFAULT_ACCENT_COLOR, readAccent } from '../accent.js';
   import { TEXT_CONTRAST_MIN, formatContrastRatio } from '../contrast.js';
+  import { DEFAULT_SCALE, SCALE_STEPS, scaleLabel } from '../scale.js';
   import { settings } from '../settings.svelte.js';
   import Button from '../ui/Button.svelte';
   import ColorField from '../ui/ColorField.svelte';
@@ -83,9 +89,13 @@
 
   const columnOptions = columnChoices();
 
+  /** The offered interface scales (`ui.scale`, HSD-nlbf), as Select options. */
+  const SCALE_OPTIONS = SCALE_STEPS.map((step) => ({ value: String(step), label: scaleLabel(step) }));
+
   let theme = $state(DEFAULT_THEME);
   let accent = $state<string | null>(DEFAULT_ACCENT_COLOR);
   let columns = $state(String(DEFAULT_COLUMNS));
+  let scale = $state(String(DEFAULT_SCALE));
   let showClock = $state(DEFAULT_FLAG);
   let hideCursor = $state(DEFAULT_FLAG);
   let showControlRail = $state(DEFAULT_FLAG);
@@ -117,6 +127,7 @@
       (accent ?? DEFAULT_ACCENT_COLOR) !==
         settings.text('ui.accent_color', DEFAULT_ACCENT_COLOR) ||
       columns !== String(savedColumns()) ||
+      scale !== String(savedScale()) ||
       showClock !== settings.flag('ui.show_clock', DEFAULT_FLAG) ||
       hideCursor !== settings.flag('ui.hide_cursor', DEFAULT_FLAG) ||
       showControlRail !== settings.flag('ui.show_control_rail', DEFAULT_FLAG)
@@ -126,11 +137,16 @@
     return settings.integer('ui.dashboard_columns', MIN_COLUMNS, MAX_COLUMNS, DEFAULT_COLUMNS);
   }
 
+  function savedScale(): number {
+    return settings.scale;
+  }
+
   /** Re-read every key from the store, so the draft is the server's answer. */
   function rebase(): void {
     theme = settings.text('ui.theme', DEFAULT_THEME);
     accent = settings.text('ui.accent_color', DEFAULT_ACCENT_COLOR);
     columns = String(savedColumns());
+    scale = String(savedScale());
     showClock = settings.flag('ui.show_clock', DEFAULT_FLAG);
     hideCursor = settings.flag('ui.hide_cursor', DEFAULT_FLAG);
     showControlRail = settings.flag('ui.show_control_rail', DEFAULT_FLAG);
@@ -162,6 +178,9 @@
     }
     if (columns !== String(savedColumns())) {
       patch['ui.dashboard_columns'] = Number(columns);
+    }
+    if (scale !== String(savedScale())) {
+      patch['ui.scale'] = Number(scale);
     }
     if (showClock !== settings.flag('ui.show_clock', DEFAULT_FLAG)) {
       patch['ui.show_clock'] = showClock;
@@ -209,6 +228,23 @@
     return columns === String(DEFAULT_COLUMNS)
       ? 'Preview: auto-fit tiles'
       : `Preview: ${columns} columns`;
+  }
+
+  /** The step the scale preview draws: the draft, never the saved value. */
+  const previewStep = $derived(Number(scale));
+
+  /** The scale preview's caption: the step and its factor in words, no measurements. */
+  const scaleCaption = $derived(describeScale(previewStep));
+
+  function describeScale(step: number): string {
+    if (step === DEFAULT_SCALE) {
+      return 'Showing 100% — tap targets, text and sheets are at their base size.';
+    }
+    const factor = step / 100;
+    if (step < DEFAULT_SCALE) {
+      return `Showing ${step}% — tap targets, text and sheets are all ${factor}× smaller.`;
+    }
+    return `Showing ${step}% — tap targets, text and sheets are all ${factor}× larger.`;
   }
 </script>
 
@@ -273,6 +309,56 @@
               <span class="preview-state">{tile.state}</span>
             </div>
           {/each}
+        </div>
+      </section>
+
+      <!--
+        A Select, not a segmented control or a stepper: design 05 §8 allows a
+        segmented control only for ≤4 options (SegmentedControl hard-errors past
+        four) and the five steps are not evenly spaced (15/15/15/20); a stepper
+        admitting 86–149 would offer sizes the backend rejects and the preview
+        never draws.
+      -->
+      <div class="field">
+        <Select label="Interface scale" options={SCALE_OPTIONS} bind:value={scale} />
+        <p class="hint">
+          Grows the whole interface — tap targets, text and sheets — for a high-DPI panel whose
+          display mode cannot be changed or should not be. It does not touch the system cursor
+          or the compositor's own chrome.
+        </p>
+      </div>
+
+      <section
+        class="preview"
+        aria-labelledby="scale-preview-title"
+        data-testid="scale-preview"
+        data-preview-scale={scale}
+      >
+        <h3 id="scale-preview-title">Scale preview</h3>
+        <p class="preview-caption">{scaleCaption}</p>
+        <!--
+          The specimen carries the attribute itself, so the real
+          `[data-ui-scale]` rules drive it: the same root-equivalent zoom and
+          the same tap floors the panel itself uses. It is the device, not a
+          lookalike, and nothing here is applied to :root.
+        -->
+        <div class="preview-frame">
+          <div
+            class="preview-device"
+            data-ui-scale={scale === String(DEFAULT_SCALE) ? undefined : scale}
+          >
+            <div class="sample-row">
+              <div class="sample-card">
+                <span class="sample-card-name">Front door</span>
+                <span class="sample-card-state">Pressed</span>
+              </div>
+              <div class="sample-rail">Volume</div>
+              <div class="sample-setting">
+                <span class="sample-setting-label">Show clock</span>
+                <span class="sample-switch"></span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -422,5 +508,137 @@
 
   .preview-state {
     font-weight: 700;
+  }
+
+  /*
+   * The specimen's viewport. This box does not zoom, so its size is its RENDERED
+   * size; the content inside is laid out in the specimen's own coordinate space
+   * (the frame divided by the factor, exactly as <html> does to the real panel)
+   * and magnified by the zoom, so it fills this frame at every step whatever its
+   * own width is. 180px is the frame at every step while the samples fit in one
+   * line — the five steps can then be compared like the same window on the same
+   * panel — and it grows only when wrapping is the price of not clipping.
+   */
+  .preview-frame {
+    display: flex;
+    align-items: center;
+    inline-size: 100%;
+    min-block-size: 180px;
+    overflow: hidden;
+    background: var(--bg);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .preview-device {
+    inline-size: 100%;
+    min-inline-size: 0;
+  }
+
+  /*
+   * The samples sit in one line whenever the frame is wide enough for their own
+   * tap floors, and wrap into more lines when it is not: the frame then grows
+   * with them (it has a minimum, not a fixed height) rather than cropping a
+   * sample, so nothing is ever clipped at any step or panel width.
+   */
+  .sample-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gap-sm);
+    inline-size: 100%;
+    min-inline-size: 0;
+    padding: var(--gap-sm);
+  }
+
+  /* A tile in miniature: its text is container-query sized, floored at 16px. */
+  .sample-card {
+    container-type: size;
+    display: flex;
+    flex: 1 1 calc(var(--tap) * 3);
+    flex-direction: column;
+    justify-content: center;
+    gap: calc(var(--gap-sm) / 2);
+    min-inline-size: 0;
+    block-size: calc(var(--tap) * 2);
+    padding: var(--gap-sm);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    line-height: 1.25;
+  }
+
+  .sample-card-name {
+    font-size: max(16px, min(5.5cqi, 7cqb));
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  .sample-card-state {
+    font-size: max(16px, min(9cqi, 11cqb));
+    font-weight: 700;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  /* A rail button: the primary tap size, so it grows with the interface. */
+  .sample-rail {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    min-inline-size: var(--tap-primary);
+    block-size: var(--tap-primary);
+    padding-inline: var(--gap-sm);
+    background: var(--surface-hover);
+    border: var(--border-width) solid var(--control-border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: var(--text-label);
+    font-weight: 600;
+  }
+
+  /* A settings row: body text beside a control that is a full tap target. */
+  .sample-setting {
+    display: flex;
+    flex: 1 1 calc(var(--tap) * 2.5);
+    align-items: center;
+    gap: var(--gap-sm);
+    min-inline-size: 0;
+    min-block-size: calc(var(--tap) + var(--gap-sm));
+    padding-inline: var(--gap-sm);
+    background: var(--surface);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: var(--text-body);
+    line-height: 1.25;
+  }
+
+  .sample-setting-label {
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .sample-switch {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    inline-size: calc(var(--tap) * 1.25);
+    block-size: var(--tap);
+    margin-inline-start: auto;
+    padding-inline: calc(var(--gap-sm) / 2);
+    background: var(--accent);
+    border-radius: 999px;
+  }
+
+  /* The thumb: the same shape the real Toggle draws, so the row reads as a switch. */
+  .sample-switch::after {
+    content: '';
+    inline-size: calc(var(--tap) * 0.6);
+    block-size: calc(var(--tap) * 0.6);
+    background: var(--accent-contrast);
+    border-radius: 50%;
   }
 </style>

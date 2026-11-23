@@ -554,18 +554,57 @@ command line — in §8.
 | Lite image, `cage`, `wlr-randr` installed | §7.1 — set it from inside the compositor. This is what the reference board runs, and it works: the mode is applied once at boot; see §0 for the prerequisite |
 | A driver that refuses a mode change after the compositor has started | §7.5 — let weston choose the mode as its initial modeset. Works, and stays optional: where §7.1 works there is no reason to switch |
 | Desktop image | The desktop's own display settings (§4); the mode chosen in GNOME or KDE persists there |
-| Nothing can set the mode and the panel is still too dense | `ui.scale` in the app — the zero-risk fallback: the page grows inside the same framebuffer, so text stays soft, but it cannot break the display |
+| Nothing can set the mode *and* the panel is still too dense, or you do not want to change the mode | `ui.scale` (Settings → Appearance → Interface scale) — §7.3a. It grows the page inside the same framebuffer: text stays soft, but it cannot break the display |
 | Nothing works: the panel or driver refuses every mode | §7.2 only with physical or serial access, and expect to revert |
 
 Whatever the route: satisfy §0 first. A desktop session holding the DRM master defeats
 all of them, and it is the reason this table used to read as if the routes themselves
 were broken.
 
-If the panel is genuinely stuck at a mode that is too dense for its size and no mode
-setting takes, a UI-side scale setting is the fallback of last resort. It is not a
-substitute: it makes the page bigger inside the same framebuffer instead of making the
-framebuffer smaller, so text stays soft and video stays expensive. Pin the mode first,
-fall back to scaling only when the display genuinely cannot do anything else.
+**Changing the display mode is the first thing to try**, and it is what §7.1, §7.2, §7.5
+and §8 all do: it makes the framebuffer smaller instead of magnifying a larger one, so
+text is rendered crisply and video costs what it should. When the panel cannot change
+mode, or you would rather keep its native resolution, `ui.scale` is the supported answer
+rather than a last resort — §7.3a.
+
+### 7.3a `ui.scale`: making the interface bigger without touching the mode
+
+**Settings → Appearance → Interface scale.** Five steps, as a percentage of the base
+size: **85 %, 100 % (the default), 115 %, 130 %, 150 %**. A step is a percent integer in
+the settings registry (`ui.scale`), so it survives export/import and cannot be set to a
+size the UI has no step for.
+
+What it does:
+
+- It multiplies the size of the **whole page**: text, tap targets, the D28 control rail,
+  sheets, the settings screens and the dashboard header. It is one multiplier, applied
+  once, as a root `zoom` — not a stack of independent ones.
+- It composes with the dashboard's container-query layout (design 05 §2.1): a tile's
+  internals are a fraction of that tile's own box, so they keep their relationship to the
+  tile at every step. The step changes the *base* the layout works from; it does not
+  scale a tile's text a second time.
+- Tap targets stay at least 48 px **as rendered** at every step, including 85 %. The type
+  and tap floors are floors on the rendered size, not on the declared size.
+- It applies on load before the first paint (the same pre-paint cache the theme uses), so
+  a stored scale does not flash an unscaled panel on the way in.
+
+What it does **not** do:
+
+- It does not touch the **system cursor**, the compositor's own chrome, the console, or
+  video resolution. Those belong to the compositor (and to the mode), not to the app; a
+  cursor that is too small at 4K is a compositor setting.
+- It does not make text crisper. A larger page in the same framebuffer means the glyphs
+  are magnified, not re-rasterised, which is why §7.3 puts the mode change first.
+- It does not re-render video or change what a stream costs.
+
+Practical limits, measured at 1280×720 with six tiles (the reference panel): 115 % raises
+the chrome with almost no cost to the tiles; 130 % makes the dashboard header wrap to a
+second row, and 150 % costs the tiles enough height that the tile text gets *smaller* than
+at 100 % — the tiles are already laid out to fill the panel, so a bigger interface has to
+take that space from somewhere. On a panel that is physically small but high resolution
+(1920×1080 and up), every step raises everything with the tiles untouched, which is what
+this setting is for. Scale up on a panel that is already tight and it is the tiles that
+pay.
 
 ### 7.4 Forward compatibility: a future `kiosk.mode` setting
 
@@ -611,8 +650,8 @@ So the shape stays: the app records intent, a supervisor inside the session rewr
 compositor configuration and restarts the compositor once, and the wrapper observes the
 result (§7.6). Never a retry loop, and never the web tier driving the display directly.
 
-For a panel whose modes genuinely cannot be changed, an app-level `ui.scale` setting
-remains the zero-risk alternative from §7.3, because it cannot break the display.
+For a panel whose modes genuinely cannot be changed, the app-level `ui.scale` setting of
+§7.3a remains the zero-risk alternative from §7.3, because it cannot break the display.
 
 ### 7.5 Making the compositor choose the mode at startup (weston)
 

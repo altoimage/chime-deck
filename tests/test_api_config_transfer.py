@@ -354,12 +354,14 @@ async def test_appearance_settings_survive_export_and_import(tmp_path: Path) -> 
         "ui.theme": "light",
         "ui.accent_color": "#2ec4b6",
         "ui.dashboard_columns": 3,
+        "ui.scale": 130,
         "ui.show_control_rail": False,
     }
     defaults: dict[str, object] = {
         "ui.theme": "dark",
         "ui.accent_color": "#4f9cf9",
         "ui.dashboard_columns": 0,
+        "ui.scale": 100,
         "ui.show_control_rail": True,
     }
 
@@ -381,6 +383,54 @@ async def test_appearance_settings_survive_export_and_import(tmp_path: Path) -> 
         assert response.status_code == 200
         for key, value in appearance.items():
             assert await state.store.get_setting(key) == value
+
+
+async def test_a_non_default_scale_round_trips_as_an_integer(tmp_path: Path) -> None:
+    """``ui.scale`` survives export and import as the int 130, not the string "130".
+
+    :param tmp_path: pytest temporary directory.
+    """
+    app, state = _build_app(tmp_path)
+
+    async with _running(app) as client:
+        await state.store.set_setting("ui.scale", 130)
+        exported = _body(await client.get("/api/config/export"))
+        exported_settings = cast("dict[str, object]", exported["settings"])
+        assert exported_settings["ui.scale"] == 130
+
+        await state.store.set_setting("ui.scale", 100)
+        response = await client.post(
+            "/api/config/import",
+            json={"document": _document(settings={"ui.scale": 130})},
+        )
+
+        assert response.status_code == 200
+        stored = await state.store.get_setting("ui.scale")
+        assert stored == 130
+        assert isinstance(stored, int)
+
+
+async def test_import_rejects_a_scale_that_is_not_a_step(tmp_path: Path) -> None:
+    """A percent between two steps is a validation problem and writes nothing.
+
+    :param tmp_path: pytest temporary directory.
+    """
+    app, state = _build_app(tmp_path)
+
+    async with _running(app) as client:
+        before = await _snapshot(state.store)
+
+        response = await client.post(
+            "/api/config/import",
+            json={"document": _document(settings={"ui.scale": 87})},
+        )
+
+        assert response.status_code == 422
+        assert _error(response)["code"] == "validation_error"
+        assert any(
+            "must be one of 85, 100, 115, 130, 150" in problem for problem in _problems(response)
+        )
+        assert await _snapshot(state.store) == before
 
 
 async def test_export_round_trips_through_import(tmp_path: Path) -> None:

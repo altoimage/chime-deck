@@ -20,16 +20,19 @@
  *   - a secret's value never comes back from the server, so the store keeps
  *     only the `secrets` flags (`hasSecret`). A panel can say "stored" without
  *     ever holding the value, and can never echo one it did not receive.
- *   - the echo is the source of truth, so the two keys that own a DOM effect are
- *     adopted from it — never from a draft. `#apply` hands `ui.theme` to its
- *     owner and writes `device.name` into the browser title, which is why a
- *     failed PATCH cannot leave the page themed with a theme the server refused,
- *     or titled with a name it would not store. Both are adopted in `#apply`
- *     rather than at a call site because that is the ONE echo path: every root
- *     (the dashboard, `/settings` and `/setup`) reaches it through `load()`.
+ *   - the echo is the source of truth, so the keys that own a DOM effect are
+ *     adopted from it — never from a draft. `#apply` hands `ui.theme` and
+ *     `ui.scale` to their owners and writes `device.name` into the browser
+ *     title, which is why a failed PATCH cannot leave the page themed or sized
+ *     with a value the server refused, or titled with a name it would not
+ *     store. All three are adopted in `#apply` rather than at a call site
+ *     because that is the ONE echo path: every root (the dashboard, `/settings`
+ *     and `/setup`) reaches it through `load()`.
  */
 
 import { type SettingsResponse, ApiError, getSettings, patchSettings } from './api.js';
+import { DEFAULT_SCALE, type ScaleStep, readScale } from './scale.js';
+import { scale } from './scale.svelte.js';
 import { theme } from './theme.svelte.js';
 import {
   DEFAULT_HARDWARE_VOLUME,
@@ -62,6 +65,10 @@ const DEFAULT_COLUMNS = 0;
 /** `ui.dashboard_columns` range the backend validates (settings_registry.py). */
 const MIN_COLUMNS = 0;
 const MAX_COLUMNS = 6;
+
+/** `ui.scale` range the backend validates (settings_registry.py, HSD-nlbf). */
+const MIN_SCALE = 85;
+const MAX_SCALE = 150;
 
 /** `device.name` default (settings_registry.py): the browser title before a name is saved. */
 const DEFAULT_DEVICE_NAME = 'ChimeDeck';
@@ -158,6 +165,17 @@ class Settings {
   /** Dashboard columns, 1..6, or 0 for auto-fit. */
   get dashboardColumns(): number {
     return this.integer('ui.dashboard_columns', MIN_COLUMNS, MAX_COLUMNS, DEFAULT_COLUMNS);
+  }
+
+  /**
+   * The interface scale (`ui.scale`, HSD-nlbf) as one of the offered steps.
+   *
+   * Read through the registry's bounds first, then through `readScale`, so a
+   * value that the backend would accept but the UI does not offer (say 105)
+   * degrades to the default instead of rendering a size with no step to show.
+   */
+  get scale(): ScaleStep {
+    return readScale(this.integer('ui.scale', MIN_SCALE, MAX_SCALE, DEFAULT_SCALE));
   }
 
   /** Software volume, 0..100; the registry default is now 100 (cd-qul9). */
@@ -276,10 +294,11 @@ class Settings {
    *
    * This is the ONE echo path (`load()` and every PATCH), so the keys that own a
    * DOM effect are handed to their owners here and nowhere else: `ui.theme` goes
-   * to the Theme object, and `device.name` becomes the browser title. The accent
-   * is not one of them: it is stored and read by the Appearance panel only. A
-   * theme selects a whole palette and so cannot break a colour pair, while an
-   * accent override would.
+   * to the Theme object, `ui.scale` to the Scale object, and `device.name`
+   * becomes the browser title. The accent is not one of them: it is stored and
+   * read by the Appearance panel only. A theme selects a whole palette and so
+   * cannot break a colour pair, while an accent override would; a scale moves
+   * the whole interface by one factor and changes no colour at all.
    *
    * The title is the same bargain as the theme: the server refused a name it did
    * not store, so the page must not keep showing it. `index.html`'s static title
@@ -291,6 +310,7 @@ class Settings {
     this.#loaded = true;
     this.#error = null;
     theme.adopt(this.text('ui.theme'));
+    scale.adopt(this.integer('ui.scale', MIN_SCALE, MAX_SCALE, DEFAULT_SCALE));
     if (typeof document !== 'undefined') {
       document.title = this.text('device.name', DEFAULT_DEVICE_NAME);
     }

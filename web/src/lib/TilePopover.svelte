@@ -137,7 +137,7 @@
     bottom: var(--gap);
     z-index: var(--z-sheet);
     width: min(420px, calc(100% - var(--gap) * 2));
-    max-height: 70dvh;
+    max-height: calc(var(--viewport-height) * 0.7);
     overflow-y: auto;
     margin-inline: auto;
     padding: var(--gap);

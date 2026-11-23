@@ -241,12 +241,16 @@
    * an unresolvable `var()` would be invalid at computed-value time and drop
    * the property to its initial `none`, not to an earlier declaration.
    *
-   * Vertically the rows share the height instead of sizing to content: `1fr`
-   * means `minmax(auto, 1fr)`, so a row grows into free space but never below
-   * its tile's own min-content. When the sum of those minimums exceeds the
-   * space, the grid gets taller than `.content` and that element's hidden
-   * scroller takes over — the safety valve, never a clip. `flex: 1` (not
-   * `height: 100%`) makes the grid claim what a `.restored` note leaves over.
+   * Vertically the rows share the height instead of sizing to content, and the
+   * row floor is `var(--tap-primary)`: `minmax(tap, 1fr)`, so a row grows into
+   * free space but never shrinks below a tappable target. The floor is D26's tap
+   * size, so a grid that needs more rows than the panel has height for makes
+   * `.content` scroll — the documented valve, above — instead of collapsing its
+   * rows below the tap floor and letting each `.card`, whose `min-height` is the
+   * same token, overflow its own tile. At 100% the floor never binds, because
+   * the rows are already taller than it, so this is a no-op until a scale step
+   * or a denser grid needs it. `flex: 1` (not `height: 100%`) makes the grid
+   * claim what a `.restored` note leaves over.
    */
   /* Columns follow tile count and available space, never screen size; fixed breakpoints or aspect ratios regress resolution- and aspect-ratio-agnostic grid sizing. */
   .tiles {
@@ -262,7 +266,7 @@
         1fr
       )
     );
-    grid-auto-rows: 1fr;
+    grid-auto-rows: minmax(var(--tap-primary), 1fr);
     align-content: stretch;
     flex: 1;
     gap: var(--gap);

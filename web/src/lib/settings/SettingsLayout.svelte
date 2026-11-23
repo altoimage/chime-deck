@@ -165,7 +165,7 @@
     /* The bar's own height, so sticky content inside the panel can sit under it. */
     --shell-bar: calc(var(--tap) + var(--gap-sm) * 2);
 
-    min-height: 100dvh;
+    min-height: var(--viewport-height);
     background: var(--bg);
     color: var(--text);
     /* Scrolling is allowed in settings (design 05 §7), unlike the dashboard. */

@@ -47,7 +47,7 @@
 
 <style>
   .setup-shell {
-    min-height: 100dvh;
+    min-height: var(--viewport-height);
     background: var(--bg);
     color: var(--text);
   }

@@ -137,6 +137,7 @@ class SettingSpec:
     All constraint fields are optional and default to "unconstrained", so a
     spec that only needs a type check stays a single line. Constraints are
     checked after the type check, in the order range, choices, length, pattern.
+    The choices rule applies to strings and integers alike.
 
     ``secret`` marks keys whose value must never be returned to the browser and
     must never appear in an error message.
@@ -157,7 +158,7 @@ class SettingSpec:
     secret: bool = False
     minimum: int | None = None
     maximum: int | None = None
-    choices: tuple[str, ...] = ()
+    choices: tuple[str | int, ...] = ()
     max_length: int | None = None
     pattern: str | None = None
     hint: str = ""
@@ -343,6 +344,18 @@ _SPECS: Final = (
     ),
     # 0 means "auto"; a wall panel shows at most a handful of columns.
     SettingSpec("ui.dashboard_columns", 0, SettingType.INTEGER, minimum=0, maximum=6),
+    # HSD-nlbf: the whole interface's base size, so a high-DPI panel is legible
+    # without changing the display mode. Percent, and only the offered steps:
+    # the panel must not be able to ask for a size the UI never previews (86 is
+    # not a step). `minimum`/`maximum` stay as the range the steps sit inside.
+    SettingSpec(
+        "ui.scale",
+        100,
+        SettingType.INTEGER,
+        minimum=85,
+        maximum=150,
+        choices=(85, 100, 115, 130, 150),
+    ),
     SettingSpec("ui.hide_cursor", True, SettingType.BOOLEAN),
     SettingSpec("ui.show_clock", True, SettingType.BOOLEAN),
     # D28's right-hand rail: an install whose panel has no speaker can turn the
@@ -457,12 +470,21 @@ baked phrase.
 """
 
 
+def _choices_text(spec: SettingSpec) -> str:
+    """The choices of *spec* as one human list, whatever their type.
+
+    :param spec: specification of the setting being validated.
+    """
+    return ", ".join(str(choice) for choice in spec.choices)
+
+
 def _check_integer(spec: SettingSpec, value: int) -> None:
-    """Check an integer setting against its range.
+    """Check an integer setting against its range and its choices.
 
     :param spec: specification of the setting being validated.
     :param value: decoded Python value already known to be an int.
-    :raises SettingValueError: if the value is outside the allowed range.
+    :raises SettingValueError: if the value is outside the allowed range or is
+        not one of the registered choices.
     """
     minimum = spec.minimum
     if minimum is not None and value < minimum:
@@ -470,6 +492,8 @@ def _check_integer(spec: SettingSpec, value: int) -> None:
     maximum = spec.maximum
     if maximum is not None and value > maximum:
         raise SettingValueError(spec.key, f"must be at most {maximum}, got {value}")
+    if spec.choices and value not in spec.choices:
+        raise SettingValueError(spec.key, f"must be one of {_choices_text(spec)}, got {value}")
 
 
 def _check_string(spec: SettingSpec, value: str) -> None:
@@ -483,7 +507,7 @@ def _check_string(spec: SettingSpec, value: str) -> None:
     :raises SettingValueError: if the value breaks a per-key constraint.
     """
     if spec.choices and value not in spec.choices:
-        reason = f"must be one of {', '.join(spec.choices)}"
+        reason = f"must be one of {_choices_text(spec)}"
         if not spec.secret:
             reason = f"{reason}; got {value!r}"
         raise SettingValueError(spec.key, reason)

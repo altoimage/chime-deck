@@ -148,6 +148,8 @@ def test_every_empty_pattern_string_has_a_sample() -> None:
         ("mqtt.port", 65536, "must be at most 65535, got 65536"),
         ("server.port", -1, "must be at least 0, got -1"),
         ("ui.dashboard_columns", 7, "must be at most 6, got 7"),
+        ("ui.scale", 84, "must be at least 85, got 84"),
+        ("ui.scale", 151, "must be at most 150, got 151"),
         ("tts.espeak_speed", 79, "must be at least 80, got 79"),
         ("tts.remote_tts.timeout_s", 0, "must be at least 1, got 0"),
         ("tts.remote_tts.timeout_s", 121, "must be at most 120, got 121"),
@@ -190,6 +192,8 @@ def test_integer_out_of_range_is_rejected(key: str, value: int, reason: str) -> 
         ("server.port", 65535),
         ("ui.dashboard_columns", 0),
         ("ui.dashboard_columns", 6),
+        ("ui.scale", 85),
+        ("ui.scale", 150),
         ("tts.espeak_speed", 80),
         ("tts.espeak_speed", 450),
         ("tts.remote_tts.timeout_s", 1),
@@ -231,6 +235,48 @@ def test_choices_are_enforced(key: str, value: str) -> None:
 
     assert exc_info.value.key == key
     assert "must be one of" in str(exc_info.value)
+
+
+def test_the_scale_steps_are_the_only_accepted_sizes() -> None:
+    """``ui.scale`` accepts the five offered steps and no other percent.
+
+    The UI previews 85, 100, 115, 130 and 150 only, so a size between two steps
+    must not reach the store: the reject message names the steps (HSD-nlbf).
+    """
+    steps = (85, 100, 115, 130, 150)
+    for step in steps:
+        validate_value("ui.scale", step)
+
+    for non_step in (87, 145):
+        with pytest.raises(SettingValueError) as exc_info:
+            validate_value("ui.scale", non_step)
+
+        assert exc_info.value.key == "ui.scale"
+        assert "must be one of 85, 100, 115, 130, 150" in exc_info.value.reason
+
+
+def test_the_scale_steps_are_integers_not_strings_or_booleans() -> None:
+    """A step is an ``int`` percent: ``"100"`` and ``True`` are type errors.
+
+    ``bool`` is an ``int`` subclass, so the type check excludes it explicitly;
+    the UI sends JSON numbers.
+    """
+    with pytest.raises(SettingTypeError):
+        validate_value("ui.scale", "100")
+    with pytest.raises(SettingTypeError):
+        validate_value("ui.scale", True)
+
+
+def test_normalise_value_and_validate_value_agree_on_a_scale_step() -> None:
+    """Both entry points reject a non-step, which is why the rule is in the validator.
+
+    ``ui.scale`` has no normaliser, so a rule that lived there would be skipped by
+    ``validate_value`` alone; a store write runs both.
+    """
+    with pytest.raises(SettingValueError):
+        normalise_value("ui.scale", 87)
+    with pytest.raises(SettingValueError):
+        validate_value("ui.scale", 87)
 
 
 def test_remote_tts_is_now_a_valid_default_engine() -> None:

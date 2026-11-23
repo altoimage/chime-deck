@@ -368,6 +368,29 @@ async def test_patch_rejects_a_non_boolean_mute_value(tmp_path: Path, value: obj
     assert fields == [{"field": "audio.muted", "reason": "expects boolean"}]
 
 
+async def test_the_scale_round_trips_and_a_non_step_is_refused(tmp_path: Path) -> None:
+    """``ui.scale`` comes back as int 130, and 87 is a 422 naming the steps (HSD-nlbf).
+
+    :param tmp_path: pytest temporary directory.
+    """
+    app, _state = _build_app(tmp_path)
+
+    async with _running(app) as client:
+        accepted = await client.patch("/api/settings", json={"ui.scale": 130})
+        get_body = cast("dict[str, object]", (await client.get("/api/settings")).json())
+        rejected = await client.patch("/api/settings", json={"ui.scale": 87})
+
+    assert accepted.status_code == 200
+    stored = cast("dict[str, object]", get_body["settings"])["ui.scale"]
+    assert stored == 130
+    assert isinstance(stored, int)
+
+    assert rejected.status_code == 422
+    envelope = ErrorEnvelope.model_validate(cast("dict[str, object]", rejected.json()))
+    assert envelope.error.code is ErrorCode.INVALID_SETTING
+    assert "must be one of 85, 100, 115, 130, 150" in envelope.error.message
+
+
 async def test_patch_stores_values_and_echoes_the_new_state(tmp_path: Path) -> None:
     """A PATCH writes every value, echoes it and a later GET agrees.
 

@@ -133,8 +133,8 @@
   .sheet {
     width: 100%;
     max-width: none;
-    height: 100dvh;
-    max-height: 100dvh;
+    height: var(--viewport-height);
+    max-height: var(--viewport-height);
     margin: 0;
     padding: 0;
     border: none;
@@ -160,7 +160,7 @@
       width: min(600px, 100%);
       max-width: min(600px, 100%);
       height: auto;
-      max-height: 80dvh;
+      max-height: calc(var(--viewport-height) * 0.8);
       margin: auto auto 0;
       border-radius: var(--radius) var(--radius) 0 0;
       box-shadow: var(--shadow-sheet);

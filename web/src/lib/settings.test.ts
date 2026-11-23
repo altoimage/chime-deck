@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { type FetchLike, type FetchResponse, setFetchImpl } from './api.js';
+import { scale } from './scale.svelte.js';
 import { settings } from './settings.svelte.js';
 
 interface Call {
@@ -440,5 +441,34 @@ describe('the browser title (HSD-vwdy)', () => {
     // Adopted from the echo, never from the draft: a refused name must not end
     // up on the tab of a wall panel.
     expect(document.title).toBe('Kitchen');
+  });
+});
+
+describe('the UI scale (HSD-nlbf)', () => {
+  afterEach(() => {
+    scale.set(100);
+  });
+
+  it('stamps ui.scale from the echo, and unsets it again at 100%', async () => {
+    setFetchImpl(fakeFetch(response({ settings: { 'ui.scale': 130 }, secrets: {} })).impl);
+    await settings.load();
+
+    expect(settings.scale).toBe(130);
+    expect(document.documentElement.dataset.uiScale).toBe('130');
+
+    settings.reset();
+    setFetchImpl(fakeFetch(response({ settings: { 'ui.scale': 100 }, secrets: {} })).impl);
+    await settings.load();
+
+    expect(document.documentElement.hasAttribute('data-ui-scale')).toBe(false);
+  });
+
+  it('degrades a value that is not an offered step to the default', async () => {
+    scale.set(130);
+    setFetchImpl(fakeFetch(response({ settings: { 'ui.scale': 87 }, secrets: {} })).impl);
+    await settings.load();
+
+    expect(settings.scale).toBe(100);
+    expect(document.documentElement.hasAttribute('data-ui-scale')).toBe(false);
   });
 });

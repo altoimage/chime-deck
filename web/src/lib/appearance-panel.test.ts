@@ -169,6 +169,21 @@ function chooseColumn(value: string): void {
   flushSync();
 }
 
+function chooseScale(value: string): void {
+  selectTrigger('Interface scale').click();
+  flushSync();
+  radioByValue(value).click();
+  flushSync();
+}
+
+function scalePreview(): HTMLElement {
+  const preview = document.querySelector<HTMLElement>('[data-testid="scale-preview"]');
+  if (preview === null) {
+    throw new Error('expected the interface-scale preview');
+  }
+  return preview;
+}
+
 function inputByLabel(label: string): HTMLInputElement {
   const row = [...document.querySelectorAll<HTMLLabelElement>('label')].find(
     (candidate) => candidate.textContent?.trim() === label
@@ -238,6 +253,9 @@ beforeEach(() => {
   settings.reset();
   setFetchImpl(null);
   unmountAll();
+  // The scale store is a module singleton: the root attribute it writes must not
+  // leak in from the test before this one.
+  delete document.documentElement.dataset.uiScale;
 });
 
 afterEach(() => {
@@ -245,6 +263,7 @@ afterEach(() => {
   settings.reset();
   setFetchImpl(null);
   toastStore.clear();
+  delete document.documentElement.dataset.uiScale;
   vi.restoreAllMocks();
 });
 
@@ -520,6 +539,7 @@ describe('11. registry keys', () => {
     const allowed = [
       'ui.theme',
       'ui.accent_color',
+      'ui.scale',
       'ui.dashboard_columns',
       'ui.show_clock',
       'ui.hide_cursor',
@@ -530,6 +550,7 @@ describe('11. registry keys', () => {
     radioByValue('light').click();
     accentPreset('#2ec4b6').click();
     flushSync();
+    chooseScale('130');
     chooseColumn('3');
     switchByLabel('Show clock').click();
     switchByLabel('Hide cursor').click();
@@ -564,5 +585,93 @@ describe('12. preview', () => {
     expect(preview?.getAttribute('data-preview-columns')).toBe('3');
     expect(pageText()).toContain('Preview: 3 columns');
     expect(preview?.querySelectorAll('.preview-tile')).toHaveLength(3);
+  });
+});
+
+/* ---- 13. interface scale ------------------------------------------------- */
+
+describe('13. interface scale', () => {
+  it('seeds the control from the echo and reports nothing dirty', async () => {
+    await renderLoaded({ settings: { 'ui.scale': 130 } });
+
+    expect(selectTrigger('Interface scale').textContent).toContain('Large — 130%');
+    // Load is the echo too: the stored step is on the root, unchanged by the panel.
+    expect(document.documentElement.dataset.uiScale).toBe('130');
+    expect(scalePreview().getAttribute('data-preview-scale')).toBe('130');
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('redraws the specimen immediately and sends no request', async () => {
+    const backend = await renderLoaded();
+
+    expect(scalePreview().getAttribute('data-preview-scale')).toBe('100');
+    // 100% drops the attribute rather than setting it: the base needs no override.
+    expect(scalePreview().querySelector('[data-ui-scale]')).toBeNull();
+
+    chooseScale('130');
+
+    expect(scalePreview().getAttribute('data-preview-scale')).toBe('130');
+    // The specimen itself carries the step, so the real [data-ui-scale] rules
+    // (zoom plus the tap floors) draw it — the preview is the device, not a lookalike.
+    expect(scalePreview().querySelector('.preview-device')?.getAttribute('data-ui-scale')).toBe(
+      '130'
+    );
+    expect(patches(backend.calls)).toHaveLength(0);
+    // Nothing reaches :root from the draft; only the echo writes the page.
+    expect(document.documentElement.hasAttribute('data-ui-scale')).toBe(false);
+  });
+
+  it('saves the step as a number and the echo applies it to the root', async () => {
+    const backend = await renderLoaded();
+
+    chooseScale('130');
+    saveButton().click();
+    await vi.waitFor(() => expect(patches(backend.calls)).toHaveLength(1));
+
+    const body = patchBody(patches(backend.calls)[0]);
+    expect(body).toEqual({ 'ui.scale': 130 });
+    // A string here is rejected by the registry: the assertion is the type.
+    expect(typeof body['ui.scale']).toBe('number');
+
+    await vi.waitFor(() =>
+      expect(toastStore.items.map((item) => item.message)).toContain('Appearance saved.')
+    );
+    flushSync();
+    expect(saveButton().disabled).toBe(true);
+    // The echo path, not the tap: settings.#apply adopts the step and the store stamps <html>.
+    expect(document.documentElement.dataset.uiScale).toBe('130');
+  });
+
+  it('keeps the server sentence, the draft and the root when the save is refused', async () => {
+    const sentence = 'ui.scale must be one of 85, 100, 115, 130 or 150';
+    await renderLoaded({
+      patchError: {
+        status: 422,
+        body: { error: { code: 'validation_error', message: sentence, detail: { key: 'ui.scale' } } }
+      }
+    });
+
+    chooseScale('130');
+    saveButton().click();
+
+    await vi.waitFor(() => expect(pageText()).toContain(sentence));
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(sentence);
+    // The draft stays on screen and Save stays usable; the page keeps its own size.
+    expect(selectTrigger('Interface scale').textContent).toContain('Large — 130%');
+    expect(saveButton().disabled).toBe(false);
+    expect(document.documentElement.hasAttribute('data-ui-scale')).toBe(false);
+  });
+
+  it('clears the root attribute when the saved step returns to 100%', async () => {
+    await renderLoaded({ settings: { 'ui.scale': 130 } });
+    expect(document.documentElement.dataset.uiScale).toBe('130');
+
+    chooseScale('100');
+    saveButton().click();
+
+    await vi.waitFor(() =>
+      expect(document.documentElement.hasAttribute('data-ui-scale')).toBe(false)
+    );
+    expect(saveButton().disabled).toBe(true);
   });
 });

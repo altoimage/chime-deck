@@ -6,9 +6,10 @@
     <meta name="color-scheme" content="dark light" />
     <title>ChimeDeck</title>
     <script>
-      // Pre-paint theme: apply the stored choice before first paint so there is
-      // no flash of the wrong palette. A denied or throwing localStorage must
-      // be swallowed — the markup default (data-theme="dark") then applies.
+      // Pre-paint theme and UI scale: apply the stored choices before first
+      // paint so there is no flash of the wrong palette, or of an unscaled
+      // panel. A denied or throwing localStorage must be swallowed — the markup
+      // default (data-theme="dark", no data-ui-scale) then applies.
       (function () {
         try {
           var stored = localStorage.getItem('doorbell.theme');
@@ -19,8 +20,23 @@
           ) {
             document.documentElement.dataset.theme = 'light';
           }
+
+          // Same pre-paint cache as the theme, for `ui.scale` (HSD-nlbf). Only a
+          // stored, off-step-100 value writes anything: 100% is the base size
+          // and needs no attribute, and an absent or unknown value must not
+          // leave one behind (it would be re-read next load).
+          var scale = localStorage.getItem('doorbell.scale');
+          if (
+            scale === '85' ||
+            scale === '100' ||
+            scale === '115' ||
+            scale === '130' ||
+            scale === '150'
+          ) {
+            if (scale !== '100') document.documentElement.dataset.uiScale = scale;
+          }
         } catch (err) {
-          /* leave data-theme="dark" */
+          /* leave data-theme="dark" and no data-ui-scale */
         }
       })();
     </script>

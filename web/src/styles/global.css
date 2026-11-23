@@ -9,12 +9,12 @@
 }
 
 html {
-  min-height: 100dvh;
+  min-height: var(--viewport-height);
   background: var(--bg);
 }
 
 body {
-  min-height: 100dvh;
+  min-height: var(--viewport-height);
   margin: 0;
   background: var(--bg);
   color: var(--text);
@@ -67,7 +67,7 @@ select {
  */
 html[data-layout='dashboard'],
 html[data-layout='dashboard'] body {
-  height: 100dvh;
+  height: var(--viewport-height);
   overflow: hidden;
   overscroll-behavior: none;
 }
