@@ -68,7 +68,7 @@ _QUEUED_TEXT: Final = (
     "will reach Home Assistant when the connection returns"
 )
 _REJECTED_TEXT: Final = (
-    "{failed} of {total} discovery payload(s) were not published — check the broker log and "
+    "{failed} discovery payload(s) were not published — check the broker log and "
     "the application log, then try again"
 )
 _UNPUBLISHED_TEXT: Final = (
@@ -175,20 +175,25 @@ def build_mqtt_router(state: AppState) -> APIRouter:
         # no enabled button the run is a clean no-op even while the broker is
         # down, and "the 0 payload(s) were queued" would be a nonsensical answer.
         queued = report.announced > 0 and (bridge is None or not bridge.connected)
-        # The two terms are disjoint sets of buttons. The counter only moves for
+        # The two terms are disjoint failure witnesses. The counter only moves for
         # payloads the paho client refused, and the bridge swallows that exception,
         # so ``republish_all`` still counts those as announced; ``report.failed``
         # names the slugs whose ``_publish`` itself raised before any publish. A
-        # run with one of each therefore lost two payloads, out of the
+        # run with one of each therefore lost three payloads, out of the
         # ``report.announced + len(report.failed)`` buttons it attempted.
+        #
+        # The message counts *payloads* and no longer quotes the button count as a
+        # denominator: since HSD-bnb0 a republish publishes twice to a button's
+        # discovery topic (the blank that lets Home Assistant move the entity id,
+        # then the announcement), so the two numbers are no longer comparable and a
+        # ratio would read "3 of 2".
         refused = max(0, after - before)
         failed = refused + len(report.failed)
         problems: list[str] = []
         if queued:
             problems.append(_QUEUED_TEXT.format(count=report.announced))
         if failed > 0:
-            total = report.announced + len(report.failed)
-            problems.append(_REJECTED_TEXT.format(failed=failed, total=total))
+            problems.append(_REJECTED_TEXT.format(failed=failed))
         if report.failed:
             problems.append(_UNPUBLISHED_TEXT.format(slugs=_slug_list(report.failed)))
         if not problems:

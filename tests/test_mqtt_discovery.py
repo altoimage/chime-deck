@@ -22,6 +22,7 @@ import ast
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -60,6 +61,7 @@ from chime_deck.mqtt import (
     MqttSettings,
     build_discovery_payload,
     build_selection_payload,
+    button_default_entity_id,
     button_icon,
     command_topic,
     configuration_url,
@@ -952,7 +954,8 @@ async def test_start_republishes_and_subscribes_only_once(tmp_path: Path) -> Non
         button = await _create_button(harness.store)
         assert _published(harness, CONFIG_TOPIC) == []
         await harness.discovery.start()
-        assert _payloads(harness, CONFIG_TOPIC) == [_serialised(button)]
+        # A republish is blank-then-announce (HSD-bnb0), not a bare config.
+        assert _payloads(harness, CONFIG_TOPIC) == ["", _serialised(button)]
         await harness.discovery.start()
         # One subscriber now dispatches both ``config.buttons_changed`` and
         # ``config.entities_changed``, so the count still proves a second
@@ -1074,6 +1077,9 @@ async def test_an_unchanged_button_event_publishes_nothing(harness: Harness) -> 
 async def test_a_birth_republishes_even_when_nothing_changed(harness: Harness) -> None:
     """A reconnect and an HA birth each republish the identical payload.
 
+    Every republish is blank-then-announce (HSD-bnb0), so each birth adds two
+    publishes to the button's discovery topic, never fewer.
+
     :param harness: the stack under test.
     """
     await _connect(harness)
@@ -1082,9 +1088,9 @@ async def test_a_birth_republishes_even_when_nothing_changed(harness: Harness) -
     harness.broker.drop(harness.client)
     await wait_until(lambda: not harness.bridge.connected)
     harness.broker.connect(harness.client)
-    await wait_until(lambda: len(_published(harness, CONFIG_TOPIC)) == 2)
-    harness.broker.publish_from_test(STATUS_TOPIC, b"online")
     await wait_until(lambda: len(_published(harness, CONFIG_TOPIC)) == 3)
+    harness.broker.publish_from_test(STATUS_TOPIC, b"online")
+    await wait_until(lambda: len(_published(harness, CONFIG_TOPIC)) == 5)
 
 
 async def test_a_button_created_while_disconnected_is_published_on_connect(
@@ -1186,7 +1192,8 @@ async def test_a_birth_skips_a_button_whose_slug_is_unusable(harness: Harness) -
     unsafe_command = "chime_deck/default/button/front.door/set"
     published_before = len(_payloads(harness, back_config))
     await harness.discovery.on_birth()
-    assert _payloads(harness, back_config)[published_before:] == [_serialised(back)]
+    # Blank-then-announce: the usable button is still there, under its pinned id.
+    assert _payloads(harness, back_config)[published_before:] == ["", _serialised(back)]
     assert _payloads(harness, unsafe_config) == []
     assert not [
         event
@@ -1428,7 +1435,9 @@ async def test_a_failing_publish_does_not_break_republish_all(
 
     ``MqttBridge.publish`` is the layer that contains a raising ``client.publish``
     (paho can raise from its own network thread), so the failure is one WARNING
-    naming the topic and nothing escapes
+    per failing publish naming the topic — and a republish publishes twice to a
+    button's topic (the HSD-bnb0 blank and the announcement), hence two — and
+    nothing escapes
     :meth:`~chime_deck.mqtt.discovery.MqttDiscovery.on_birth`.
 
     :param harness: the stack under test.
@@ -1442,7 +1451,7 @@ async def test_a_failing_publish_does_not_break_republish_all(
     caplog.set_level(logging.WARNING)
     await harness.discovery.on_birth()
     assert _payloads(harness, back_config)[-1] == _serialised(back)
-    assert len(_publish_failures(caplog, CONFIG_TOPIC)) == 1
+    assert len(_publish_failures(caplog, CONFIG_TOPIC)) == 2
 
 
 async def test_retract_all_survives_a_failing_publish(
@@ -1499,6 +1508,346 @@ async def test_stop_publishes_nothing_to_discovery_topics(harness: Harness) -> N
     assert dict(harness.discovery.command_topics) == {}
     assert dict(harness.discovery.published) == {}
     await harness.bridge.stop()
+
+
+# ----------------------------------------------------- button entity ids (HSD-bnb0)
+
+_HOME_ASSISTANT_ENTITY_ID_SEPARATORS: Final = re.compile(r"[^a-z0-9]+")
+"""Runs of characters Home Assistant replaces with ``_`` in an entity id part."""
+
+
+def _home_assistant_slug(value: str) -> str:
+    """Slug *value* the way Home Assistant composes a derived entity id part.
+
+    :param value: device or entity display name.
+    """
+    return _HOME_ASSISTANT_ENTITY_ID_SEPARATORS.sub("_", value.lower()).strip("_")
+
+
+def _device_name_entity_id(config: Mapping[str, object]) -> str:
+    """Return the entity id Home Assistant derives when none is pinned.
+
+    Home Assistant prefixes the device name, so device "ChimeDeck" plus button
+    "Front Door Chime" is ``button.chimedeck_front_door_chime`` — the second
+    spelling this ticket removes from one device page.
+
+    :param config: one discovery config payload carrying no ``default_entity_id``.
+    """
+    device = config.get("device")
+    device_name = ""
+    if isinstance(device, Mapping):
+        name = device.get("name")
+        if isinstance(name, str):
+            device_name = name
+    return f"button.{_home_assistant_slug(device_name)}_{_home_assistant_slug(str(config['name']))}"
+
+
+class HomeAssistantButtonRegistry:
+    """A tiny in-test model of Home Assistant's MQTT entity discovery.
+
+    It models the documented semantics this ticket relies on:
+
+    * a config payload registers ``unique_id -> entity id``, where the entity id
+      is ``default_entity_id`` when the payload carries one, otherwise Home
+      Assistant's device-name-derived ``<device name> <entity name>`` slug form;
+    * an empty payload deletes the entity registered on that discovery topic and
+      tombstones its registry entry (an empty payload on a topic that never
+      carried an entity is a no-op);
+    * a config for a tombstoned ``unique_id`` restores the entry and takes the
+      new ``default_entity_id``, while a config for a *live* ``unique_id`` never
+      changes its entity id — an entity id is chosen once, at first
+      registration, and a config update cannot move it.
+
+    The third rule is the load-bearing one: it is why the pre-seeded migration
+    test fails when the blank before the announcement is dropped. A model that
+    let a config rename a live entry could not see that bug.
+    """
+
+    def __init__(self) -> None:
+        """Create a registry with no entity and no tombstone."""
+        self.entities: dict[str, str] = {}
+        """Live entities as ``unique_id -> entity id``."""
+        self.tombstones: dict[str, str] = {}
+        """Removed registry entries as ``unique_id -> the entity id they held``."""
+        self.topics: dict[str, str] = {}
+        """Discovery topics as ``topic -> unique_id``, the way Home Assistant maps a blank."""
+
+    def apply(self, topic: str, payload: str) -> None:
+        """Apply one discovery publish, in publish order.
+
+        :param topic: discovery topic the payload arrived on.
+        :param payload: config payload, or ``""`` for a removal.
+        """
+        if payload == "":
+            self._remove(topic)
+        else:
+            self._register(topic, payload)
+
+    def button_entity_ids(self) -> list[str]:
+        """Return every live button entity id, sorted for a stable assertion."""
+        return sorted(
+            entity_id for entity_id in self.entities.values() if entity_id.startswith("button.")
+        )
+
+    def _remove(self, topic: str) -> None:
+        """Delete the entity on *topic* and tombstone its registry entry.
+
+        :param topic: discovery topic the empty payload arrived on.
+        """
+        unique = self.topics.pop(topic, None)
+        if unique is None:
+            return
+        entity_id = self.entities.pop(unique, None)
+        if entity_id is not None:
+            self.tombstones[unique] = entity_id
+
+    def _register(self, topic: str, payload: str) -> None:
+        """Register or restore the entity one config payload describes.
+
+        :param topic: discovery topic the payload arrived on.
+        :param payload: JSON config payload.
+        """
+        config: dict[str, object] = json.loads(payload)
+        unique = str(config["unique_id"])
+        self.topics[topic] = unique
+        if unique in self.entities:
+            return
+        pinned = config.get("default_entity_id")
+        if unique in self.tombstones:
+            self.tombstones.pop(unique)
+            assert isinstance(pinned, str), "a restored entity must take the new pinned id"
+            self.entities[unique] = pinned
+            return
+        self.entities[unique] = (
+            pinned if isinstance(pinned, str) else _device_name_entity_id(config)
+        )
+
+
+def _button_publishes(harness: Harness) -> list[tuple[str, str]]:
+    """Return every recorded button discovery publish, in order.
+
+    Only topics under ``<prefix>/button/`` are button discovery: availability,
+    selection and legacy-purge publishes are not.
+
+    :param harness: the stack under test.
+    """
+    publishes: list[tuple[str, str]] = []
+    for topic, payload, _, _ in harness.client.published:
+        if topic.startswith(f"{CONFIG_PREFIX}/button/"):
+            assert isinstance(payload, str)
+            publishes.append((topic, payload))
+    return publishes
+
+
+def _replay_button_publishes(
+    harness: Harness, registry: HomeAssistantButtonRegistry, *, since: int = 0
+) -> int:
+    """Replay the recorded button discovery publishes from *since* through *registry*.
+
+    :param harness: the stack under test.
+    :param registry: model to apply the publishes to.
+    :param since: how many button publishes were already replayed.
+    :returns: the new count, to pass as *since* on the next call.
+    """
+    publishes = _button_publishes(harness)
+    for topic, payload in publishes[since:]:
+        registry.apply(topic, payload)
+    return len(publishes)
+
+
+async def test_the_button_payload_pins_its_entity_id() -> None:
+    """The button payload pins ``button.chime_deck_<slug>`` in the designed position."""
+    payload = build_discovery_payload(
+        _button(), settings=_settings(), availability_topic=AVAILABILITY
+    )
+    assert payload["default_entity_id"] == "button.chime_deck_front_door"
+    assert tuple(payload)[:3] == ("name", "unique_id", "default_entity_id")
+    assert tuple(payload) == DISCOVERY_KEY_ORDER
+
+
+@pytest.mark.parametrize(
+    ("slug", "expected"),
+    [
+        ("front-door", "button.chime_deck_front_door"),
+        ("front.door", "button.chime_deck_front_door"),
+        ("dryer_done", "button.chime_deck_dryer_done"),
+    ],
+)
+async def test_a_button_slug_is_mapped_into_the_object_id_grammar(slug: str, expected: str) -> None:
+    """The stored slug is mapped into Home Assistant's object-id grammar.
+
+    The stored slug keeps a dash (:func:`chime_deck.store.derive_slug`), but an
+    entity id may not contain one, so the dash becomes ``_``. A legacy row whose
+    slug still carries a dot maps to the same id, and a plain underscore slug is
+    unchanged — one rule, three spellings of the same button.
+
+    :param slug: stored button slug under test.
+    :param expected: the entity id it must publish.
+    """
+    entity_id = button_default_entity_id(slug)
+    assert entity_id == expected
+    assert "-" not in entity_id.split(".", 1)[1]
+
+
+async def test_the_pinned_entity_id_ignores_the_device_name_and_the_instance_id() -> None:
+    """Only the slug names the entity: a device or instance rename cannot move it (D32).
+
+    ``device.name`` labels the device page and ``mqtt.instance_id`` roots every
+    topic, and both may change; the pinned id is slug-only, so Home Assistant
+    keeps the entity an automation already references. That is the whole reason
+    the value is pinned rather than derived from the device name.
+    """
+    default_settings = _settings()
+    other_settings = MqttSettings(
+        host=HOST,
+        discovery_prefix=CONFIG_PREFIX,
+        instance_id="rig",
+        device_name="Hall Doorbell",
+    )
+    button = _button()
+    default_payload = build_discovery_payload(
+        button, settings=default_settings, availability_topic=AVAILABILITY
+    )
+    other_payload = build_discovery_payload(
+        button, settings=other_settings, availability_topic=AVAILABILITY
+    )
+    assert default_payload["default_entity_id"] == "button.chime_deck_front_door"
+    assert other_payload["default_entity_id"] == default_payload["default_entity_id"]
+    # The identity root really did change, so the stability above is the pin and
+    # not two identical settings.
+    assert other_payload["unique_id"] != default_payload["unique_id"]
+    assert discovery_topic(other_settings, button.slug) != discovery_topic(
+        default_settings, button.slug
+    )
+
+
+async def test_the_button_config_is_blanked_before_it_is_announced(harness: Harness) -> None:
+    """A republish ends with the empty config immediately followed by the announcement.
+
+    The pair is asserted, not membership: an announcement without the preceding
+    blank leaves Home Assistant holding the old entity id. Both publishes are
+    non-retained and at :data:`DISCOVERY_PUBLISH_QOS`, the contract every
+    discovery publish of ours follows.
+
+    :param harness: the stack under test.
+    """
+    await _connect(harness)
+    created = await _create_button(harness.store)
+    await harness.discovery.on_birth()
+    assert _published(harness, CONFIG_TOPIC)[-2:] == [
+        (CONFIG_TOPIC, "", DISCOVERY_PUBLISH_QOS, False),
+        (CONFIG_TOPIC, _serialised(created), DISCOVERY_PUBLISH_QOS, False),
+    ]
+
+
+async def test_a_pre_seeded_button_entity_converges_to_the_pinned_id(harness: Harness) -> None:
+    """An entity already registered under the old id moves to the pinned one.
+
+    This is the upgrade path. The previous build's config carries no
+    ``default_entity_id``, so Home Assistant registered the button by device
+    name: ``button.chimedeck_front_door_chime``. The current build blanks the
+    same discovery topic and then announces the pinned id; Home Assistant
+    restores the tombstoned entry with that id because an entity id is chosen at
+    first registration and a config update alone can never move a live one.
+    Dropping the blank breaks this test, which is why the model refuses to rename
+    a live entry.
+
+    :param harness: the stack under test.
+    """
+    registry = HomeAssistantButtonRegistry()
+    created = await _create_button(harness.store)
+    previous_payload = dict(
+        build_discovery_payload(created, settings=_settings(), availability_topic=AVAILABILITY)
+    )
+    previous_payload.pop("default_entity_id")
+    previous = encode_payload(previous_payload)
+    # Seeded on the broker and fed to the model: discovery is non-retained, so a
+    # running Home Assistant is the only holder of the previous config.
+    harness.broker.publish_from_test(CONFIG_TOPIC, previous.encode())
+    registry.apply(CONFIG_TOPIC, previous)
+    assert registry.button_entity_ids() == ["button.chimedeck_front_door_chime"]
+
+    await _connect(harness)
+    await wait_until(lambda: _payloads(harness, CONFIG_TOPIC) != [])
+    _replay_button_publishes(harness, registry)
+    assert registry.button_entity_ids() == ["button.chime_deck_front_door"]
+    assert "button.chimedeck_front_door_chime" not in registry.entities.values()
+    assert list(registry.topics) == [CONFIG_TOPIC]
+    assert registry.tombstones == {}
+
+
+async def test_a_deleted_button_leaves_no_entity_behind(harness: Harness) -> None:
+    """A delete publishes the blank on the unchanged discovery topic.
+
+    The discovery topic is derived from ``unique_id``, which does not move on a
+    delete, so the empty payload lands exactly where the entity is registered,
+    and the registry holds a tombstone rather than a ghost.
+
+    :param harness: the stack under test.
+    """
+    registry = HomeAssistantButtonRegistry()
+    await _connect(harness)
+    created = await _create_button(harness.store)
+    replayed = _replay_button_publishes(harness, registry)
+    assert registry.button_entity_ids() == ["button.chime_deck_front_door"]
+    await harness.store.delete_button(created.id)
+    assert _payloads(harness, CONFIG_TOPIC)[-1] == ""
+    _replay_button_publishes(harness, registry, since=replayed)
+    assert registry.button_entity_ids() == []
+    assert len(registry.tombstones) == 1
+
+
+async def test_a_renamed_button_purges_the_new_topic_before_announcing(harness: Harness) -> None:
+    """A rename blanks the old topic, then the new one, then announces.
+
+    A rename moves the pinned entity id with the slug, so the new topic is
+    blanked before it is announced and the old topic is retracted: nothing is
+    left under either id, and the entity ends up at the new pinned id only.
+
+    :param harness: the stack under test.
+    """
+    registry = HomeAssistantButtonRegistry()
+    await _connect(harness)
+    created = await _create_button(harness.store)
+    replayed = _replay_button_publishes(harness, registry)
+    assert registry.button_entity_ids() == ["button.chime_deck_front_door"]
+
+    renamed = await _rename(harness.store, created, "side-door")
+    new_config = "homeassistant/button/chime_deck_default_side-door/config"
+    assert _payloads(harness, CONFIG_TOPIC)[-1] == ""
+    assert _payloads(harness, new_config)[-2:] == ["", _serialised(renamed)]
+    _replay_button_publishes(harness, registry, since=replayed)
+    assert registry.button_entity_ids() == ["button.chime_deck_side_door"]
+    assert list(registry.topics) == [new_config]
+
+
+async def test_a_blank_lost_while_disconnected_converges_on_the_next_birth(
+    harness: Harness,
+) -> None:
+    """The birth seam repairs the one coalescer in this path: the offline buffer.
+
+    The service is started before the CONNACK, so every publish of the first
+    republish is buffered. The buffer is keyed by topic and keeps only the last
+    payload per topic, so the blank is genuinely coalesced away and only the
+    config survives. The bridge flushes the buffer and then invokes ``on_birth``
+    on every connect, so the blank-then-announce pair arrives from the birth
+    seam and Home Assistant converges with no timer of ours.
+
+    :param harness: the stack under test.
+    """
+    registry = HomeAssistantButtonRegistry()
+    await harness.bridge.start()
+    created = await _create_button(harness.store)
+    await harness.discovery.start()
+    # Nothing has reached the wire yet: only the config survived the buffer.
+    assert _published(harness, CONFIG_TOPIC) == []
+
+    harness.broker.connect(harness.client)
+    await wait_until(
+        lambda: _payloads(harness, CONFIG_TOPIC) == [_serialised(created), "", _serialised(created)]
+    )
+    _replay_button_publishes(harness, registry)
+    assert registry.button_entity_ids() == ["button.chime_deck_front_door"]
 
 
 # ------------------------------------------------------------ import isolation

@@ -46,6 +46,7 @@ from .bridge import (
     load_mqtt_settings,
 )
 from .discovery import (
+    BUTTON_DEFAULT_ENTITY_ID_TEMPLATE,
     CONFIGURATION_PATH,
     CONFIGURATION_URL_TEMPLATE,
     DEFAULT_BUTTON_ICON,
@@ -85,6 +86,7 @@ from .discovery import (
     assign_selection_slugs,
     build_discovery_payload,
     build_selection_payload,
+    button_default_entity_id,
     button_icon,
     command_topic,
     configuration_url,
@@ -110,6 +112,7 @@ __all__ = [
     "AVAILABILITY_OFFLINE",
     "AVAILABILITY_ONLINE",
     "AVAILABILITY_TOPIC_TEMPLATE",
+    "BUTTON_DEFAULT_ENTITY_ID_TEMPLATE",
     "CLIENT_ID_PREFIX",
     "CONFIGURATION_PATH",
     "CONFIGURATION_URL_TEMPLATE",
@@ -174,6 +177,7 @@ __all__ = [
     "assign_selection_slugs",
     "build_discovery_payload",
     "build_selection_payload",
+    "button_default_entity_id",
     "button_icon",
     "command_topic",
     "configuration_url",

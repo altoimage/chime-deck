@@ -132,7 +132,7 @@ Every identifier this module publishes is built from ``settings.instance_id``:
 | MQTT client id ``chime-deck-{instance}`` | instance | stable | changes |
 | ``device`` block ``name`` (HA device page) | ``device.name`` | changes | stable |
 | browser title | ``device.name`` | changes | stable |
-| ``default_entity_id`` ``switch.chime_deck_{slug}`` | slug only | stable | stable |
+| ``default_entity_id`` ``{button,switch}.chime_deck_{slug}`` | slug only | stable | stable |
 | manufacturer / model / sw_version / configuration_url | constants | stable | stable |
 
 So ``mqtt.instance_id`` is the identity root and ``device.name`` only renames the
@@ -145,6 +145,28 @@ here: the reload path retracts every identifier of the old generation through
 :meth:`MqttDiscovery.retract_all` before the new generation publishes, so the old
 entities are removed rather than orphaned. The pre-rename purge in
 :mod:`chime_deck.mqtt.legacy` is the same mechanism for an old *build*'s grammar.
+
+**The entity id is pinned in the payload, not derived from the device name
+(HSD-bnb0).** When no id is pinned Home Assistant prefixes the device name, so
+device "ChimeDeck" plus a button named "Front Door Chime" became
+``button.chimedeck_front_door_chime`` while the selection switch was
+``switch.chime_deck_<slug>`` — two spellings on one device page. Both entity
+types now publish the one ``chime_deck_<slug>`` rule
+(:func:`button_default_entity_id`, :func:`selection_default_entity_id`), whose
+slug composition is :func:`selection_slug`'s: the dash slug
+:func:`chime_deck.store.derive_slug` derives, mapped into object-id grammar. The
+id is slug-only, so it is stable across ``device.name`` and ``mqtt.instance_id``
+changes (D32). The migration for an entity already registered under the old id
+is blank-then-announce on the SAME discovery topic (the topic is derived from
+``unique_id`` and does not move), non-retained, unconditional on every republish
+and on every rename, so no bookkeeping is needed and a lost blank converges on
+the next CONNACK or Home Assistant birth. No settle delay is used: Home
+Assistant's MQTT discovery keeps a per-entity FIFO queue and processes an empty
+payload followed by a config in order (its own rapid-rediscover test drives four
+such messages back to back), while the one coalescer in this path is the
+bridge's offline buffer, which is keyed by topic and keeps only the last
+payload — and that is repaired because the bridge flushes the buffer before
+invoking ``on_birth`` on every connect.
 
 **Why the payload cache exists despite design §5's idempotence.** Bake traffic
 is the reason: ``ConfigStore.set_bake_state``/``record_bake_failure``/
@@ -159,7 +181,7 @@ Owning ticket: HSD-c3si; the selection switches were added by HSD-fro0, made
 writable by D34 (HSD-8a5f), the slugs they are named by moved to the tile
 display name in HSD-jw0x, the pre-rename purge was added by HSD-l84l, and the
 device name became a setting with the instance id as the identity root in
-HSD-vwdy.
+HSD-vwdy, and the button entity id was pinned and migrated in HSD-bnb0.
 """
 
 from __future__ import annotations
@@ -186,6 +208,7 @@ if TYPE_CHECKING:
     from .bridge import MqttSettings
 
 __all__ = [
+    "BUTTON_DEFAULT_ENTITY_ID_TEMPLATE",
     "CONFIGURATION_PATH",
     "CONFIGURATION_URL_TEMPLATE",
     "DEFAULT_BUTTON_ICON",
@@ -230,6 +253,7 @@ __all__ = [
     "assign_selection_slugs",
     "build_discovery_payload",
     "build_selection_payload",
+    "button_default_entity_id",
     "button_icon",
     "command_topic",
     "configuration_url",
@@ -320,6 +344,7 @@ fire first to leave room for the republish itself.
 DISCOVERY_KEY_ORDER: Final[tuple[str, ...]] = (
     "name",
     "unique_id",
+    "default_entity_id",
     "command_topic",
     "payload_press",
     "icon",
@@ -331,7 +356,13 @@ DISCOVERY_KEY_ORDER: Final[tuple[str, ...]] = (
     "entity_category",
     "device",
 )
-"""Design 02 §2's top-level keys in the order the payload must be serialised."""
+"""Design 02 §2's top-level keys as amended by §8a, in payload order.
+
+``default_entity_id`` is part of the payload: the entity id is *pinned* by
+ChimeDeck rather than derived by Home Assistant from the device name
+(HSD-bnb0). Its position is the same one :data:`SELECTION_KEY_ORDER` uses —
+directly after ``unique_id`` — so the two entity types are written alike.
+"""
 
 DEVICE_KEY_ORDER: Final[tuple[str, ...]] = (
     "identifiers",
@@ -370,6 +401,17 @@ SELECTION_DISCOVERY_TOPIC_TEMPLATE: Final = "{prefix}/switch/chime_deck_{instanc
 
 SELECTION_DEFAULT_ENTITY_ID_TEMPLATE: Final = "switch.chime_deck_{slug}"
 """Preferred entity id of one tile's selection switch (design 02 §9, D34)."""
+
+BUTTON_DEFAULT_ENTITY_ID_TEMPLATE: Final = "button.chime_deck_{slug}"
+"""Preferred Home Assistant entity id of one chime button (design 02 §8a, HSD-bnb0).
+
+The button rule and :data:`SELECTION_DEFAULT_ENTITY_ID_TEMPLATE` are the same
+rule: ``chime_deck_`` plus the object-id form of the slug. Pinned in the payload
+so Home Assistant does not derive the entity id from the device name
+(``device.name`` "ChimeDeck" would otherwise produce
+``button.chimedeck_<button name>``), and slug-only so the id is stable across
+both a ``device.name`` and an ``mqtt.instance_id`` change (D32).
+"""
 
 SELECTION_READ_ONLY_DISCOVERY_TOPIC_TEMPLATE: Final = (
     "{prefix}/binary_sensor/chime_deck_{instance}_{slug}/config"
@@ -432,14 +474,17 @@ deliberately no ``device_class`` (none is suitable), and no
 ``qos``/``retain``/``entity_category`` (§9's example carries none of them).
 """
 
-_SELECTION_SLUG_SEPARATORS: Final = re.compile(r"[^a-z0-9]+")
+_OBJECT_ID_SEPARATORS: Final = re.compile(r"[^a-z0-9]+")
 """Runs of characters a Home Assistant *object id* cannot contain.
 
-Applied by :func:`selection_slug` to the dash slug
-:func:`chime_deck.store.derive_slug` derives from a tile's display name, and
-by :func:`selection_entity_id_slug` to a raw Home Assistant entity id. Both use
-``_`` rather than the ``-`` ``derive_slug`` keeps: dashes are forbidden in a Home
-Assistant entity id.
+This is the one mapping applied by BOTH entity types. :func:`selection_slug`
+applies it to the dash slug :func:`chime_deck.store.derive_slug` derives from a
+tile's display name, :func:`selection_entity_id_slug` applies it to a raw Home
+Assistant entity id, and :func:`button_default_entity_id` applies it to a
+button's stored dash slug. All three use ``_`` rather than the ``-``
+``derive_slug`` keeps: dashes are forbidden in a Home Assistant entity id. One
+rule shared by both conventions is what stops them from drifting apart again —
+two spellings of the same rule is exactly the bug HSD-bnb0 fixed.
 """
 
 _SLUG_PATTERN: Final = re.compile(r"[a-z0-9_-]{1,128}")
@@ -539,7 +584,7 @@ def selection_slug(entity: Entity) -> str:
             # ``..store`` import (see MqttDiscovery.on_config_changed).
             from ..store import SlugDerivationError, derive_slug
 
-            return _SELECTION_SLUG_SEPARATORS.sub("_", derive_slug(name))
+            return _OBJECT_ID_SEPARATORS.sub("_", derive_slug(name))
         except SlugDerivationError:
             _LOGGER.debug(
                 "display name %r of %s has no usable character; falling back to its entity id",
@@ -567,7 +612,7 @@ def selection_entity_id_slug(entity_id: str) -> str:
     :param entity_id: Home Assistant entity id, e.g. ``lock.front_door``.
     :returns: the slug, or ``""`` when the entity id has no usable character.
     """
-    return _SELECTION_SLUG_SEPARATORS.sub("_", entity_id.lower()).strip("_")
+    return _OBJECT_ID_SEPARATORS.sub("_", entity_id.lower()).strip("_")
 
 
 def selection_unique_id(settings: MqttSettings, slug: str) -> str:
@@ -646,6 +691,26 @@ def selection_default_entity_id(slug: str) -> str:
     :param slug: selection slug derived by :func:`selection_slug`.
     """
     return SELECTION_DEFAULT_ENTITY_ID_TEMPLATE.format(slug=slug)
+
+
+def button_default_entity_id(slug: str) -> str:
+    """Return the preferred Home Assistant entity id of one chime button.
+
+    The composition is the selection switches' rule, not a second copy of it: the
+    button's stored dash slug (:func:`chime_deck.store.derive_slug`'s output,
+    HSD-po1g) is mapped into Home Assistant's *object id* grammar, where a dash is
+    forbidden, by replacing each run of dashes with ``_``. ``front-door`` is
+    therefore ``button.chime_deck_front_door``; a legacy row whose slug still
+    carries a dot (``front.door``) maps to the same id, and a plain
+    ``dryer_done`` is unchanged.
+
+    The value is slug-only on purpose: Home Assistant uses it once, when the
+    entity is first registered, so it must not move when either label setting
+    moves (D32). HSD-bnb0.
+
+    :param slug: the button slug the discovery payload is published under.
+    """
+    return BUTTON_DEFAULT_ENTITY_ID_TEMPLATE.format(slug=_OBJECT_ID_SEPARATORS.sub("_", slug))
 
 
 def is_mqtt_safe_slug(slug: str) -> bool:
@@ -840,11 +905,17 @@ def build_discovery_payload(
     configuration_url: str | None = None,
     sw_version: str = __version__,
 ) -> dict[str, object]:
-    """Build one design 02 §2 discovery payload.
+    """Build one design 02 §2 discovery payload, with the §8a entity id pinned.
 
     The availability payloads come from :mod:`chime_deck.mqtt.bridge` so
     there is exactly one source of truth for them. ``sw_version`` is injectable
     so the golden files do not churn on a version bump.
+
+    ``default_entity_id`` is computed here (HSD-bnb0) rather than left to Home
+    Assistant: without it Home Assistant prefixes the *device* name and one device
+    page shows ``button.chimedeck_<button name>`` beside
+    ``switch.chime_deck_<slug>``. Pinning it makes both entity types publish the
+    one ``chime_deck_<slug>`` rule.
 
     :param button: button to describe.
     :param settings: MQTT settings holding the discovery prefix and instance id.
@@ -855,6 +926,7 @@ def build_discovery_payload(
     return {
         "name": button.name,
         "unique_id": unique_id(settings, button.slug),
+        "default_entity_id": button_default_entity_id(button.slug),
         "command_topic": command_topic(settings, button.slug),
         "payload_press": PRESS_PAYLOAD,
         "icon": button_icon(button),
@@ -1337,6 +1409,15 @@ class MqttDiscovery:
         because a create-while-down publishes through the bridge's buffer and a
         cache-skipped republish after the flush would never reach the wire.
 
+        The announcement is now blank-then-announce (:meth:`_blank_button_entity`
+        immediately before :meth:`_publish`), unconditionally, with no bookkeeping.
+        That is what makes an install whose Home Assistant was down when it
+        upgraded still converge on the next republish: the blank is idempotent and
+        leaves nothing to remember. It lives here rather than in
+        :meth:`_publish`/:meth:`_sync` because bake traffic republishes payloads
+        for buttons whose entity is not moving, and blanking a live entity for no
+        reason would churn it.
+
         :return: how many payloads were handed to the bridge and which slugs raised.
         """
         try:
@@ -1370,6 +1451,10 @@ class MqttDiscovery:
         failed: list[str] = []
         for button in desired.values():
             try:
+                # Blank first, in the same ``try``: a blank that raises counts as a
+                # failed slug exactly like a failed announce, so a half-migrated
+                # entity is never left behind quietly.
+                self._blank_button_entity(button.slug)
                 self._publish(button)
             except Exception:
                 failed.append(button.slug)
@@ -1934,8 +2019,12 @@ class MqttDiscovery:
     async def _handle_event(self, payload: Mapping[str, object]) -> None:
         """Apply the three lifecycle phases of one buttons-changed payload.
 
-        Renames first (retract the old entity, then publish the new one), then
-        deletions, then the created/updated slugs. Every item has its own
+        Renames first (retract the old entity, blank the new topic, then publish
+        the new one — a rename moves the pinned entity id with the slug), then
+        deletions, then the created/updated slugs. The delete phase's
+        :meth:`_retract` is already the blank for a deleted button: the discovery
+        topic is derived from ``unique_id`` and does not move, so the empty payload
+        lands on the topic the entity is registered under. Every item has its own
         ``except``: the bus catches per handler only, so one bad slug must not
         swallow the rest of a committed event.
 
@@ -1971,6 +2060,9 @@ class MqttDiscovery:
                 self._retract(old)
                 handled.update((old, new))
                 if button is not None and button.enabled:
+                    # A rename moves the pinned entity id with the slug, so the
+                    # topic it moves to is blanked before it is announced.
+                    self._blank_button_entity(new)
                     self._publish(button)
             except Exception:
                 self._logger.exception("handling the rename %r -> %r failed", old, new)
@@ -2059,6 +2151,9 @@ class MqttDiscovery:
 
         The command subscription is added only when it is not already routed, so
         an updated or republished button does not re-SUBSCRIBE on every event.
+        The caller blanks first when an entity id may be moving
+        (:meth:`republish_all`, a rename): this method alone is an update of an
+        entity that is staying where it is.
 
         :param button: button whose payload should be published.
         """
@@ -2079,9 +2174,11 @@ class MqttDiscovery:
         """Remove one entity from Home Assistant and stop routing its presses.
 
         An empty payload is the only removal signal Home Assistant has for a
-        non-retained discovery topic. When the command topic was never routed
-        there is nothing published to remove and no filter to drop, so this is a
-        quiet no-op.
+        non-retained discovery topic, and it is literally the same blank
+        :meth:`_blank_button_entity` publishes before an announcement: one helper,
+        so a delete and a rename can never drift apart on the wire. When the
+        command topic was never routed there is nothing published to remove and no
+        filter to drop, so this is a quiet no-op.
 
         :param slug: button slug whose entity should be removed.
         """
@@ -2089,15 +2186,42 @@ class MqttDiscovery:
         if topic not in self._topic_slugs:
             self._logger.debug("nothing to retract for %s: its command topic is not routed", slug)
             return
+        self._blank_button_entity(slug)
+        self._bridge.unsubscribe(topic)
+        self._topic_slugs.pop(topic, None)
+        self._published[slug] = None
+
+    def _blank_button_entity(self, slug: str) -> None:
+        """Blank one button's discovery config so a stale entity id is removed first.
+
+        Published with the same empty, **non-retained** payload :meth:`_retract`
+        uses — the two paths share this one helper: discovery is deliberately not
+        retained (design 02 §4), so a retained blank would plant a broker
+        tombstone that every later Home Assistant subscriber replays, and there is
+        no retained config of ours for it to clear. An empty payload on a topic
+        that never carried an entity is a harmless no-op, which is what lets the
+        caller stay unconditional.
+
+        This is the rename half of HSD-bnb0, the same "blank before you announce"
+        shape :meth:`_publish_selection` established for the pre-D34 read-only
+        entity: Home Assistant removes the entity registered under the old,
+        device-name-derived id (``button.chimedeck_*``) and tombstones its registry
+        entry; the announcement that follows re-registers it under the pinned
+        ``button.chime_deck_<slug>`` id, and Home Assistant applies that id because
+        the entry it restores from the tombstone carries a different one. Without
+        this blank the registry entry would survive and Home Assistant would keep
+        the old entity id forever (an entity id is chosen at first registration and
+        a config update cannot move it).
+
+        :param slug: button slug whose entity may be registered under an older
+            entity id.
+        """
         self._bridge.publish(
             discovery_topic(self._settings, slug),
             "",
             qos=DISCOVERY_PUBLISH_QOS,
             retain=False,
         )
-        self._bridge.unsubscribe(topic)
-        self._topic_slugs.pop(topic, None)
-        self._published[slug] = None
 
     def _serialise(self, button: Button) -> str:
         """Return the serialised discovery payload of one button.

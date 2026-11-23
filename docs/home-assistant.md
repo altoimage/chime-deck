@@ -18,7 +18,7 @@ every entity ChimeDeck owns. There are two kinds:
 
 | Entity | What it is |
 | --- | --- |
-| `button.<device>_<button>` | A chime button. Pressing it plays that button exactly as a dashboard tap does. These are hidden from the main dashboard (`entity_category: config`), so add them to a card or use them from an automation. |
+| `button.chime_deck_<slug>` | A chime button. Pressing it plays that button exactly as a dashboard tap does. The id is pinned by ChimeDeck's discovery payload, so it no longer depends on the device name. These are hidden from the main dashboard (`entity_category: config`), so add them to a card or use them from an automation. |
 | `switch.chime_deck_<slug>` | One selection switch per tile, named "`<tile> selected`". `on` means that tile is highlighted on the panel right now. |
 
 **The switch mirrors the highlighted tile.** Tap a tile on the panel and Home
@@ -46,7 +46,7 @@ This is the whole point of the writable switch. When a load finishes:
 
 1. You tap the **Dryer** tile on the panel. Its switch turns `on` in Home
    Assistant.
-2. The automation below presses `button.chimedeck_dryer_done`, so the chime
+2. The automation below presses `button.chime_deck_dryer_done`, so the chime
    plays through ChimeDeck.
 3. The same automation turns `switch.chime_deck_dryer` off, so the tile clears
    on the panel.
@@ -67,7 +67,7 @@ turning on**, not a time or a sensor state — the tile selection *is* the event
   actions:
     - action: button.press
       target:
-        entity_id: button.chimedeck_dryer_done
+        entity_id: button.chime_deck_dryer_done
     - action: switch.turn_off
       target:
         entity_id: switch.chime_deck_dryer
@@ -75,10 +75,9 @@ turning on**, not a time or a sensor state — the tile selection *is* the event
 
 Paste it into an automation in the Home Assistant UI (or your
 `automations.yaml`), then check **Developer tools → States** to confirm the
-entity ids match yours. `button.chimedeck_dryer_done` is the entity id Home
-Assistant gave the button whose name is "Dryer Done"; `switch.chime_deck_dryer`
-is pinned by ChimeDeck's discovery payload and does not depend on the device
-name.
+entity ids match yours. `button.chime_deck_dryer_done` is the entity id of the
+button whose name is "Dryer Done"; both ids are pinned by ChimeDeck's discovery
+payload and do not depend on the device name.
 
 The order matters: press the chime **first**, then clear the tile. Clearing the
 switch publishes `off`, which this trigger (`to: "on"`) ignores, so the
@@ -148,6 +147,23 @@ and the retained state topic (`chime_deck/<instance>/selection/<slug>`) are
 unchanged, so only the entity's *domain* moves — and, as always, every switch
 starts from `off` when ChimeDeck starts, because the selection itself is never
 persisted.
+
+---
+
+## Upgrading from device-name button entity ids
+
+Older builds let Home Assistant name the buttons after the device, so they
+appeared as `button.chimedeck_<button name>` (for a device called "ChimeDeck"
+and a button called "Dryer Done", `button.chimedeck_dryer_done`). The current
+build pins `button.chime_deck_<slug>` in its discovery payload. On every connect
+ChimeDeck blanks the old discovery config before it announces the new one, so
+the old entities disappear on their own — no broker surgery, no MQTT cleanup.
+
+**Existing automations that reference a `button.chimedeck_*` id must be
+repointed to `button.chime_deck_<slug>`.** A stale reference fails silently:
+the action simply never presses anything. Only the *id* moves — Home Assistant
+restores the entity's area, labels and name override when it re-registers, so
+nothing else about the button needs setting up again.
 
 ---
 

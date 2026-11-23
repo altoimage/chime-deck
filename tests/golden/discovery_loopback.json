@@ -1,6 +1,7 @@
 {
   "name": "Front Door Chime",
   "unique_id": "chime_deck_default_front-door",
+  "default_entity_id": "button.chime_deck_front_door",
   "command_topic": "chime_deck/default/button/front-door/set",
   "payload_press": "PRESS",
   "icon": "mdi:doorbell",

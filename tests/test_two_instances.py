@@ -269,9 +269,14 @@ async def test_two_units_on_one_broker_have_distinct_identities(installed: Insta
     for unit in installed.units:
         topic = discovery_topic(unit.settings, SLUG)
         payloads = [
-            cast("dict[str, object]", json.loads(cast(str, event[2])))
+            cast("dict[str, object]", json.loads(event[2]))
             for event in installed.broker.events
-            if event[0] == "publish" and event[1] == topic and isinstance(event[2], str)
+            # The HSD-bnb0 blank publishes a non-JSON empty payload to the same
+            # topic; only a config payload names a device.
+            if event[0] == "publish"
+            and event[1] == topic
+            and isinstance(event[2], str)
+            and event[2] != ""
         ]
         assert payloads, f"no discovery payload was published for {unit.settings.instance_id}"
         payload = payloads[-1]

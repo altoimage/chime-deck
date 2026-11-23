@@ -339,6 +339,10 @@ async def test_republish_reports_a_rejected_publish(
     service never sees the failure: the bridge's own failure counter is the only
     witness, and the difference across the call is what the route reports.
 
+    A republish publishes twice to a button's discovery topic — the HSD-bnb0
+    blank that lets Home Assistant move the entity id, then the announcement —
+    so a refused topic loses two payloads, not one.
+
     :param tmp_path: pytest temporary directory.
     :param fake_broker: broker carrying the client that refuses one topic.
     """
@@ -369,23 +373,28 @@ async def test_republish_reports_a_rejected_publish(
     body = _body(response)
     assert body["ok"] is False
     assert body["announced"] == 2
-    assert body["failed"] == 1
+    assert body["failed"] == 2
     assert body["queued"] is False
-    assert "1 of 2 discovery payload(s) were not published" in _error_message(response)
-    assert topics.count(surviving_topic) == before_surviving + 1
+    assert "2 discovery payload(s) were not published" in _error_message(response)
+    # The surviving topic gets the HSD-bnb0 blank and the announcement.
+    assert topics.count(surviving_topic) == before_surviving + 2
     assert topics.count(rejected_topic) == before_rejected
 
 
-async def test_republish_counts_a_refusal_and_a_raise_as_two_failures(
+async def test_republish_counts_a_refusal_and_a_raise_as_three_failures(
     tmp_path: Path, fake_broker: FakeBroker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One refused payload plus one raising payload is two lost announcements.
+    """A refused topic plus a raising payload is three lost payloads, not two.
 
     The two failure witnesses are disjoint. ``MqttBridge.publish`` contains the
     paho exception, so the refused slug still counts as ``announced`` and only
     the bridge's counter moves; ``republish_all`` records the slug whose
     ``_publish`` raised. The raise is forced by replacing the live discovery
     service's ``_serialise``, which *monkeypatch* puts back afterwards.
+
+    A refused topic loses two payloads: the HSD-bnb0 blank and the announcement.
+    The report counts lost payloads, not buttons, for that reason — the two are no
+    longer comparable, so no ratio is quoted.
 
     :param tmp_path: pytest temporary directory.
     :param fake_broker: broker carrying the client that refuses one topic.
@@ -421,10 +430,10 @@ async def test_republish_counts_a_refusal_and_a_raise_as_two_failures(
     assert body["ok"] is False
     assert body["announced"] == 1
     assert body["queued"] is False
-    assert body["failed"] == 2
+    assert body["failed"] == 3
     message = _error_message(response)
     # Both problems are named: the count of lost payloads, then the raising slug.
-    assert "2 of 2 discovery payload(s) were not published" in message
+    assert "3 discovery payload(s) were not published" in message
     assert "the discovery payload for front-door could not be published" in message
 
 
