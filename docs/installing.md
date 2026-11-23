@@ -73,6 +73,40 @@ This was measured on systemd 262 (dev host) and on the ARM board (Armbian/Ubuntu
 `usermod -aG audio` plus a user-manager restart is the supported route. Do not "fix" a
 missing audio group by adding `SupplementaryGroups=` back; it will refuse to start.
 
+### Volume has two stages, and both need to be right
+
+Audible loudness is the product of **two** independent stages:
+
+```
+app volume (software gain)  ×  output device hardware volume
+```
+
+Both are sliders in **Settings → Audio** and both default to **100**. The app applies the stored
+hardware level at startup, so the device's own mixer is not left wherever the OS or the card
+happened to leave it — a fresh USB audio card can boot at a fraction of its range, making a panel
+that says 100% play at half volume. Setting the hardware level is what removes that gap.
+
+The second slider exists because **a device held at 100% can hiss or buzz while nothing is
+playing.** If you hear that between chimes, lower the *hardware* slider and leave the software one
+high: hardware is the analogue noise floor, software is the signal.
+
+`audio.rail_target` (Settings → Audio) chooses which of the two the front-panel rail's volume
+buttons move — `software` by default, `hardware` if you would rather the buttons set the ceiling.
+
+The two are deliberately **independent**: putting software at 50% and hardware at 50% plays at 25%
+of maximum, which is why neither slider is silently multiplied into the other in the UI.
+
+Check what the device really reports (read-only, safe):
+
+```bash
+amixer -c <card> sget Speaker   # hardware level + mute; find <card> in /proc/asound/cards
+curl -s http://127.0.0.1:8080/api/audio/hardware   # what the app believes it set
+```
+
+If the hardware slider is disabled with "no hardware volume control", the output device simply has
+no such control — common on HDMI — and only the software slider applies. Coarse card steps are
+normal: a request for 60 may land on 65.
+
 ---
 
 ## 4. Install uv
@@ -529,6 +563,16 @@ the system one); your user is in the `audio` group (`getent group audio`, and
 after the `usermod` (`loginctl terminate-user "$USER"` or a reboot); and
 **Settings → Audio → *Play test tone***. If the test tone is silent, the problem is the device
 or the sink, not the app. If it plays, the problem is the phrase or the engine.
+
+**It is quiet even though the volume says 100%.**
+The app's slider is the *software* stage; the output device has a separate hardware level, and a
+fresh card can sit at a fraction of its range. Open **Settings → Audio** and look at the *hardware*
+volume slider — if it is below 100 that is your missing loudness, not a bad speaker. The hardware
+level is applied at startup from the stored setting, so raising it once is enough. If that slider is
+instead disabled because the device has no such control (common on HDMI), only the software slider
+applies. The
+[#Volume has two stages](#volume-has-two-stages-and-both-need-to-be-right) section in §3
+explains both, including the hiss you can get from holding hardware at 100% while nothing plays.
 
 **The unit will not start.**
 `journalctl --user -u chime-deck -n 50 --no-pager` first. `status=216/GROUP` means someone

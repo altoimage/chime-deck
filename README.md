@@ -33,7 +33,12 @@ Think "video doorbell chime, but for every event in my house".
 ## What it does
 
 - **Status tiles** — pick any Home Assistant entity; the tile shows its icon, name and
-  current state, updating live over the Home Assistant websocket.
+  current state, updating live over the Home Assistant websocket. Tap a tile to highlight it:
+  each highlighted tile appears in Home Assistant as a **switch** you can also set or clear
+  from an automation.
+- **Volume that tells the truth** — loudness is two independent stages, the app's own gain and
+  the output device's hardware level, each with its own slider. "100%" means the device is
+  actually at 100%, which is the failure this pair of sliders exists to prevent.
 - **Chime buttons** — each one appears in Home Assistant as a native device button.
   Configure what it plays: an audio file, a downloaded sound URL, or a spoken phrase.
 - **Speech you can template** — the spoken phrase can include live Home Assistant values,

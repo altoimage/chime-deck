@@ -8,7 +8,7 @@ entity status on a local web UI and exposes MQTT chime buttons that play a sound
 TTS phrase on the device's own speaker.
 
 Context lives in `Project_state/` (git-ignored): `architecture.md`, `decisions.md`,
-`glossary.md`, `design/01..06`. Read the relevant design doc before planning a ticket.
+`glossary.md`, `design/01..07`. Read the relevant design doc before planning a ticket.
 
 ---
 
@@ -228,6 +228,16 @@ timeout 180 uv run mypy src
 timeout 300 uv run pytest
 ```
 
+With a frontend change, also (bounded, and run the browser tier **twice** — two UI timing
+regressions on this project were caught only on the second run):
+
+```bash
+cd web && timeout 900 npm run verify        # svelte-check, contrast, storyboard, vitest, build, check-dist, check-dist-stale
+cd web && timeout 900 npm run test:browser  # Playwright, against a real backend
+```
+
+Current baselines to hold: **2575 passed / 12 skipped** (backend), **961** vitest, **82** Playwright.
+
 Skip a command only if it genuinely cannot apply yet, and say so explicitly in the report.
 
 For anything needing a real system binary, the container harness is the answer:
@@ -242,8 +252,16 @@ timeout 600 ./scripts/test-integration.sh     # once it exists (see the harness 
 
 Unless a ticket says otherwise:
 
-- The frontend (`web/`) does not exist yet. Static serving must degrade gracefully when
-  `web/dist` is missing. `web/dist` is **not** git-ignored — it will be committed later.
-- No Home Assistant client, MQTT bridge, audio engine or TTS engine until their tickets.
-- No Docker, kiosk, systemd or release files until their tickets.
-- No authentication (decision D20).
+- The application is **feature-complete and in production** on the reference panel: tiles, chime
+  buttons, MQTT bridge, Home Assistant client (REST + websocket), audio engine, TTS, the Svelte
+  frontend, systemd units, kiosk wrapper, Docker images and the release workflow all exist.
+- **`web/dist` is committed and must stay byte-reproducible.** `npm run verify` runs `check-dist`
+  and `check-dist-stale`; never hand-edit `dist`, always rebuild from `web/src`.
+- **Working tickets are UX, hardware and polish**, not scaffolding — read the ticket before
+  assuming a subsystem is unbuilt.
+- **Two listeners (D33):** loopback `127.0.0.1:8080` serves the whole app for the kiosk; the admin
+  listener serves configuration only. The dashboard must never be reachable on the LAN.
+- **No authentication on the kiosk listener** (D20 for that listener only; the admin listener has a
+  password once one is set). Do not add auth to `/` — the kiosk cannot log in.
+- The reference panel at `192.168.0.211` is **production** (HARD RULE 8): read-only by default, and
+  every mutation needs explicit owner approval.
