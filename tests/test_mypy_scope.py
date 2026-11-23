@@ -1,9 +1,10 @@
 """The mypy scope is declared once, in pyproject.toml, and nothing may narrow it.
 
 ``[tool.mypy] files = ["src", "tests"]`` is the single source of truth, so the bare command
-``uv run mypy`` is the only form allowed in CI, in pre-commit and in the docs. A trailing path
-argument (``mypy src``) would keep CI green while a whole tree went unchecked, so this module
-holds the single scope true mechanically instead of by review.
+``uv run mypy`` is the only form allowed in CI, in pre-commit, in the docs and in AGENTS.md,
+the file every agent reads first. A trailing path argument (``mypy src``) would keep CI green
+while a whole tree went unchecked, so this module holds the single scope true mechanically
+instead of by review.
 """
 
 from __future__ import annotations
@@ -56,6 +57,35 @@ def _narrowing_paths(command: str) -> list[str]:
         argument
         for argument in _mypy_command_paths(command)
         if argument.endswith(".py") or "/" in argument or (ROOT / argument).exists()
+    ]
+
+
+def _document_sources(root: Path) -> list[Path]:
+    """Return every file that may carry a mypy command for a human or a machine to copy.
+
+    :param root: the repo root to scan.
+    :returns: the docs, the workflows, the pre-commit config and AGENTS.md, in that order.
+    """
+    return [
+        *sorted((root / "docs").rglob("*")),
+        *sorted((root / ".github/workflows").rglob("*")),
+        root / ".pre-commit-config.yaml",
+        root / "AGENTS.md",
+    ]
+
+
+def _narrowing_reports(root: Path) -> list[str]:
+    """Return one ``file: command`` entry per mypy invocation that names a path.
+
+    :param root: the repo root to scan.
+    :returns: one ``file: command`` entry per narrowing invocation, in scan order.
+    """
+    return [
+        f"{path.relative_to(root)}: {match.group(0)}"
+        for path in _document_sources(root)
+        if path.is_file()
+        for match in INVOCATION.finditer(path.read_text(encoding="utf-8", errors="replace"))
+        if _narrowing_paths(match.group(0))
     ]
 
 
@@ -127,19 +157,23 @@ def test_no_document_or_hook_narrows_the_command_with_a_path() -> None:
     assert "`mypy`" in RELEASING.read_text(encoding="utf-8"), (
         "docs/releasing.md must name the bare `mypy` command"
     )
-    sources = [
-        *sorted((ROOT / "docs").rglob("*")),
-        *sorted((ROOT / ".github/workflows").rglob("*")),
-        PRECOMMIT,
-    ]
-    offenders = [
-        f"{path.relative_to(ROOT)}: {match.group(0)}"
-        for path in sources
-        if path.is_file()
-        for match in INVOCATION.finditer(path.read_text(encoding="utf-8", errors="replace"))
-        if _narrowing_paths(match.group(0))
-    ]
-    assert not offenders, "mypy invoked with a path argument:\n  " + "\n  ".join(offenders)
+    offenders = _narrowing_reports(ROOT)
+    assert not offenders, (
+        "mypy invoked with a path argument, but each of these files must run the bare command:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_guard_catches_a_path_argument_in_agents_md(tmp_path: Path) -> None:
+    """AGENTS.md is scanned too, so the file every agent reads first cannot drift."""
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("timeout 240 uv run mypy src\n", encoding="utf-8")
+    reports = _narrowing_reports(tmp_path)
+    assert len(reports) == 1, reports
+    assert reports[0].startswith("AGENTS.md: "), reports
+    assert "mypy src" in reports[0], reports
+    agents.write_text("timeout 240 uv run mypy\n", encoding="utf-8")
+    assert _narrowing_reports(tmp_path) == []
 
 
 def test_the_guard_would_catch_a_path_argument() -> None:
