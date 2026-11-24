@@ -172,10 +172,15 @@ test('the header reports the health of the bench it is talking to', async ({ pag
 });
 
 test('the control rail never overlaps the tile grid', async ({ page }) => {
+  /** `--rail-control` (cd-bdjz): the square each rail control is painted at. */
+  const CONTROL_SIZE = 80;
+
   const viewports = [
     { width: 1024, height: 600 },
+    { width: 1280, height: 720 }, // the panel the owner measured the rail at
     { width: 1280, height: 800 },
-    { width: 1920, height: 1080 }
+    { width: 1920, height: 1080 },
+    { width: 720, height: 1280 } // portrait (D30)
   ];
 
   for (const viewport of viewports) {
@@ -219,11 +224,13 @@ test('the control rail never overlaps the tile grid', async ({ page }) => {
     expect(geometry.rail.right, detail).toBeLessThanOrEqual(geometry.innerWidth);
     expect(geometry.rail.bottom, detail).toBeLessThanOrEqual(geometry.innerHeight);
 
-    // Exactly the four D28 controls, each on the 56 px tap target.
+    // Exactly the four D28 controls, each on the new 80 px rail control.
     expect(geometry.controls, detail).toHaveLength(4);
     for (const control of geometry.controls) {
-      expect(control.width, detail).toBe(56);
-      expect(control.height, detail).toBe(56);
+      // Square, and the enlargement cd-bdjz asked for: 80px is `--rail-control`,
+      // 24px bigger than the `--tap-primary` square this test used to pin.
+      expect(control.width, detail).toBe(CONTROL_SIZE);
+      expect(control.height, detail).toBe(CONTROL_SIZE);
     }
 
     // The grid ends where the rail begins, and no tile box touches it. The

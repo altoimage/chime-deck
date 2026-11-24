@@ -86,12 +86,11 @@
 
 <style>
   .rail {
-    /* One primary tap target plus one --gap-sm of inline padding either side:
-       56 + 2 * 8 = 72px at ui.scale 100%, and it keeps following --tap-primary
-       under ui.scale. A fixed column, not a shrink-to-fit: the rail is the
-       dashboard's right-hand edge (D28) and nothing in it is sized by its text
-       any more. */
-    --rail-column: calc(var(--tap-primary) + 2 * var(--gap-sm));
+    /* One rail control plus one --gap-sm of inline padding either side is
+       80 + 2 * 8 = 96px at ui.scale 100%. The gutters are the deliberate gap
+       between the control and the column edge; the column still follows
+       --rail-control under ui.scale. A fixed column, not shrink-to-fit. */
+    --rail-column: calc(var(--rail-control) + 2 * var(--gap-sm));
     display: flex;
     flex: none;
     flex-direction: column;
@@ -102,14 +101,28 @@
     max-height: 100%;
     padding: 0 var(--gap-sm);
     overflow: hidden;
+    /* The controls ask how tall the column is (`cqh` below). The rail's height
+       is already the stretched height of `.body`, i.e. definite, so size
+       containment cannot collapse it; it only stops the controls' size from
+       feeding back into the column. */
+    container-type: size;
   }
 
   .control {
     display: grid;
     flex: none;
     place-items: center;
-    width: var(--tap-primary);
-    height: var(--tap-primary);
+    /* The target is --rail-control (80px), but four of them plus three --gap
+       must fit the column. Measured on the dev host: at ui.scale 130% on
+       1024x600 the column is 392px, and at 150% on 1280x720 it is 460px, so a
+       flat 80px stack (4 * 80 + 3 * 16 = 368 layout px) clips the settings gear
+       at those steps. The clamp takes the largest square that fits and never
+       goes below --tap-primary, so a touch target only ever grows from today's
+       56px and the rail never clips where it does not clip today. 100cqh is the
+       column's height (see container-type above). */
+    --rail-fit: clamp(var(--tap-primary), calc((100cqh - 3 * var(--gap)) / 4), var(--rail-control));
+    width: var(--rail-fit);
+    height: var(--rail-fit);
     min-width: var(--tap-primary);
     min-height: var(--tap-primary);
     padding: 0;
@@ -118,6 +131,18 @@
     background: var(--surface);
     color: var(--text);
     transition: background-color var(--motion-fast) var(--ease);
+  }
+
+  /* cd-bdjz: the icon rides the control instead of a fixed `size` prop, so the
+     drawn glyph stays ~40% of the button at every size the clamp picks. The MDI
+     volume path's own box is 19 of the 24 viewBox units, measured in the
+     browser; a 50% box therefore paints the glyph at 38.6% of an 80px control
+     measured in a real render (the percentage resolves against the 78px content
+     box inside the 1px border). It was 24px in a 56px control, i.e. 33.9%,
+     before. */
+  .control :global(svg) {
+    width: 50%;
+    height: 50%;
   }
 
   button.control {

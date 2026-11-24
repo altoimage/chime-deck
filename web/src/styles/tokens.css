@@ -37,6 +37,11 @@
   /* sizes (D26 touch rules) */
   --tap: 48px; /* errata 1: doc says 44px; D26 requires 48px */
   --tap-primary: 56px;
+  /* cd-bdjz: the rail's primary control. A rail-local token, deliberately not a
+     larger `--tap-primary`: that token is also the D30 grid row floor, the
+     header's min-height and a card's min-height, and `scripts/check-dist.mjs`
+     pins its literal 56px value in the built CSS. */
+  --rail-control: 80px;
   --gap: 16px;
   --gap-sm: 8px;
   --radius: 18px;
@@ -133,5 +138,6 @@
      quotient can render a hair under the floor. */
   --tap: max(48px, calc(48px / var(--ui-scale) + 0.5px));
   --tap-primary: max(56px, calc(56px / var(--ui-scale) + 0.5px));
+  --rail-control: max(80px, calc(80px / var(--ui-scale) + 0.5px));
   --thumb: max(32px, calc(32px / var(--ui-scale) + 0.5px));
 }

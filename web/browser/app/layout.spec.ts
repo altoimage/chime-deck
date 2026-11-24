@@ -117,21 +117,23 @@ const SCALE_VIEWPORTS = [
 const SMALLEST_SCALE = 85;
 
 /**
- * The three panels the control rail is measured on.
+ * The four panels the control rail is measured on.
  *
  * The first two are the sizes the ticket names: the reference panel the owner
- * measured the rail at, and the wall panel. Portrait is the third because D30
- * already asks every fixed floor to hold there, and the rail is one of those
- * floors (`--tap-primary` square controls in a fixed column).
+ * measured the rail at, and the wall panel. 1920x1080 is the largest landscape
+ * panel, and portrait is last because D30 already asks every fixed floor to hold
+ * there, and the rail is one of those floors (`--rail-control` squares in a
+ * fixed column).
  *
  * A third constant, not `MATRIX`: the browser tier runs serially under a 300s
- * global timeout, and this test needs the three shapes the ticket names, not all
+ * global timeout, and this test needs the shapes the ticket names, not all
  * seven. Adding these to `MATRIX` would also change what the fill tests assert
  * there, for the same reason `VIEWPORTS` and `MATRIX` stay apart.
  */
 const RAIL_VIEWPORTS = [
   { width: 1280, height: 720 }, // the reference panel, where the owner measured it
   { width: 1024, height: 600 }, // the wall panel
+  { width: 1920, height: 1080 }, // the largest landscape panel
   { width: 720, height: 1280 } // portrait (D30)
 ] as const;
 
@@ -548,9 +550,10 @@ interface RenderedGeometry {
    * The rail's own **border box**: the fixed column (D28) those controls sit in.
    *
    * This is what the file used to spend on a caption pill's *width*, and its
-   * width is now the size assertion itself: 72 layout px at 100% and at 130%,
-   * i.e. 93.6 **rendered** px at 130%, because the column is a token sum rather
-   * than a viewport share.
+   * width is now the size assertion itself: 96 layout px at 100% and at 130%
+   * (80 of `--rail-control` plus two 8px gutters, cd-bdjz), i.e. 124.8
+   * **rendered** px at 130%, because the column is a token sum rather than a
+   * viewport share.
    */
   readonly rail: BoxRect | null;
   readonly railButton: BoxRect | null;
@@ -1953,8 +1956,8 @@ test('ui.scale multiplies the interface once, not twice, and D30 stays scale-inv
 
     // The column and the control inside it moved by the same factor: if only one
     // had moved twice, or if the column had kept a px width laid out inside the
-    // zoomed space, this ratio would move. 72/56 — one primary tap target plus two
-    // small gaps against that target — must stay put at every step.
+    // zoomed space, this ratio would move. 96/80 — one rail control plus two small
+    // gaps against that control — must stay put at every step.
     const railOfButton = {
       base: base.rail.width / base.railButton.height,
       scaled: scaled.rail.width / scaled.railButton.height
@@ -2336,9 +2339,14 @@ test('ui.scale scales sheets and the settings screens', async ({ page, request }
 });
 
 /**
- * The control rail: four 56px controls in a fixed 72px column (D28), with no
+ * The control rail: four 80px controls in a fixed 96px column (D28), with no
  * visible text left to clip and the volume stage in the accessibility tree
  * instead of on the wall display.
+ *
+ * cd-bdjz widened it from 56/72 to 80/96 because the owner read the column as
+ * wasted horizontal space. The vertical gap between the separate targets is
+ * deliberately unchanged at 16px -- four separate targets, not one segmented
+ * strip.
  *
  * cd-qpg6 shipped twice. The first pass sized the caption pill to its word and
  * let the column grow with it -- an elaborate proof that a word can be made to
@@ -2350,23 +2358,26 @@ test('ui.scale scales sheets and the settings screens', async ({ page, request }
  * a visible text node in the rail failing clause 3 -- as well as the box the
  * removed pill used to widen.
  */
-test('the control rail is four 56px controls in a 72px column with no text to clip', async ({
+test('the control rail is four 80px controls in a 96px column with no text to clip', async ({
   page,
   request
 }) => {
-  // Eight page loads (six measured panels, two behaviour taps) plus the real
+  // Ten page loads (eight measured panels, two behaviour taps) plus the real
   // backend reads behind each one: the default 60s per test is not enough
   // headroom for the tier's own 300s global budget.
-  test.setTimeout(120_000);
+  test.setTimeout(150_000);
 
-  /** `--rail-column`: `--tap-primary` plus one `--gap-sm` either side (D28). */
-  const RAIL_COLUMN_WIDTH = 72;
-  /** `--tap-primary`: the square each control is painted at. */
-  const CONTROL_SIZE = 56;
+  /** `--rail-column`: `--rail-control` (80) plus one `--gap-sm` either side (8). */
+  const RAIL_COLUMN_WIDTH = 96;
+  /**
+   * `--rail-control`: the square each control is painted at. It was
+   * `--tap-primary` (56) before cd-bdjz.
+   */
+  const CONTROL_SIZE = 80;
   /**
    * Sub-pixel tolerance. `getBoundingClientRect()` returns fractions of a layout
-   * px, and the rail is a `calc()` of two tokens, so the honest number is "72 to
-   * within rounding" rather than exactly 72.0.
+   * px, and the rail is a `calc()` of two tokens, so the honest number is "96 to
+   * within rounding" rather than exactly 96.0.
    */
   const TOLERANCE = 0.5;
 
@@ -2447,7 +2458,7 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
           `visible text nodes ${visibleTexts.length}`
       );
 
-      // The column the removed pill used to widen: a fixed 72px, not a
+      // The column the removed pill used to widen: a fixed 96px, not a
       // viewport share and not a shrink-to-fit around a word.
       expect(measured.rail.width, detail).toBeGreaterThanOrEqual(RAIL_COLUMN_WIDTH - TOLERANCE);
       expect(measured.rail.width, detail).toBeLessThanOrEqual(RAIL_COLUMN_WIDTH + TOLERANCE);
@@ -2488,8 +2499,8 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
         const box = await renderedBoxOf(control);
         const boxDetail = `${detail}; control ${index} ${JSON.stringify(box)}`;
 
-        // 56×56 is `--tap-primary`: a primary tap target, square, at every panel
-        // size in `RAIL_VIEWPORTS`.
+        // 80x80 is `--rail-control`, square, at every panel size in
+        // `RAIL_VIEWPORTS`.
         expect(box.width, boxDetail).toBeGreaterThanOrEqual(CONTROL_SIZE - TOLERANCE);
         expect(box.width, boxDetail).toBeLessThanOrEqual(CONTROL_SIZE + TOLERANCE);
         expect(box.height, boxDetail).toBeGreaterThanOrEqual(CONTROL_SIZE - TOLERANCE);
@@ -2570,6 +2581,283 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
     // the 0..100 range.
     const body = (await response.json()) as { settings?: Record<string, unknown> };
     expect(body.settings?.[key], `${target} tap on ${key} at ${seeded}`).toBe(expected);
+  }
+
+  watch.assertAllLocal();
+});
+
+/** The rail's painted frames, collected in one page evaluation. */
+interface ControlFrames {
+  readonly innerWidth: number;
+  readonly innerHeight: number;
+  readonly controls: readonly BoxRect[];
+}
+
+/** One control's icon, in both painted and viewBox terms. */
+interface GlyphMetrics {
+  /** The control's own painted width: `--rail-control`, or the clamp's answer. */
+  readonly controlWidth: number;
+  /** The `svg` box inside it — a percentage of the control, not a px `size`. */
+  readonly svgWidth: number;
+  /** The `path`'s own box, in viewBox units: the MDI volume glyph is 19 of 24. */
+  readonly bboxWidth: number;
+  /** The `viewBox` width, in the same units. */
+  readonly viewBoxWidth: number;
+}
+
+/**
+ * The wider rail (cd-bdjz): 80px controls in a 96px column, with the tiles still
+ * covering the panel the D30 contract asks for.
+ *
+ * Two questions at once, on purpose. Widening the column spends tile area, and
+ * the acceptance criterion is that the grid keeps filling the panel — so the
+ * fill contract is re-run here, at the ticket's four panels, instead of trusted
+ * from the earlier tests. And the control is one square in one column: the
+ * failure this test has to rule out is a rail that grows by merging four targets
+ * into a single strip, which would satisfy a width assertion and lose four tap
+ * targets, so the gaps and the parent structure are asserted too.
+ */
+test('the wider rail keeps the tiles filling the panel and its own controls whole', async ({
+  page,
+  request
+}) => {
+  // Four page loads (one per panel) plus the real backend reads behind each one,
+  // with the same headroom argument as the rail test above.
+  test.setTimeout(120_000);
+
+  /**
+   * The panels the ticket names: the reference panel the owner measured the rail
+   * at, the wall panel, the largest landscape panel, and portrait (D30).
+   */
+  const PANELS = [
+    { width: 1280, height: 720 },
+    { width: 1024, height: 600 },
+    { width: 1920, height: 1080 },
+    { width: 720, height: 1280 } // portrait: the rail is not a landscape-only rule
+  ] as const;
+
+  /** `--rail-column`: `--rail-control` (80) plus one `--gap-sm` either side (8). */
+  const RAIL_COLUMN_WIDTH = 96;
+  /** `--rail-control`: the square each control is painted at. It was 56 before. */
+  const CONTROL_SIZE = 80;
+  /**
+   * Sub-pixel tolerance, as in the rail test above: `getBoundingClientRect()`
+   * returns fractions of a layout px and the column is a `calc()` of two tokens.
+   */
+  const TOLERANCE = 0.5;
+  /**
+   * The measured gap between two adjacent controls at 100% — `--gap`. The floor
+   * asserted below is 12, not 16, because a future scale step may resolve the
+   * rail's own layout a hair under; what the assertion forbids is a rail whose
+   * targets touch.
+   */
+  const MIN_GAP = 12;
+
+  const rail = page.locator('[data-testid="control-rail"]');
+  const stage = page.locator('[data-testid="rail-volume-stage"]');
+  const controls = rail.locator('.control');
+  const header = page.locator('.header');
+
+  const names = [
+    'Turn software volume up',
+    'Turn software volume down',
+    'Mute',
+    'Settings'
+  ] as const;
+  const sentence = 'The volume buttons change software volume.';
+
+  // `audio.muted` is not one of the bench's canonical settings, so the mute
+  // control's accessible name depends on whatever the previous spec left behind.
+  // Seed it false: this test asserts the name, not the toggle order.
+  const unmuted = await request.patch('/api/settings', { data: { 'audio.muted': false } });
+  expect(unmuted.ok(), await unmuted.text()).toBe(true);
+
+  for (const viewport of PANELS) {
+    await openWithTiles(page, request, SEED.length, viewport);
+
+    const geometry = await measureFill(page);
+    const detail = detailOf(`wider rail at ${viewport.width}x${viewport.height}`, geometry);
+    expect(geometry.rail, `the dashboard has no control rail to measure — ${detail}`).not.toBeNull();
+
+    const railBox = await renderedBoxOf(rail);
+    const headerBox = await renderedBoxOf(header);
+
+    const frame = await page.evaluate((): ControlFrames => {
+      function boxOf(element: Element): BoxRect {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height
+        };
+      }
+
+      const root = document.querySelector('[data-testid="control-rail"]');
+      if (root === null) {
+        throw new Error('the dashboard has no control rail to measure');
+      }
+      return {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        controls: Array.from(root.querySelectorAll('.control')).map(boxOf)
+      };
+    });
+
+    const glyph = await controls.first().evaluate((control): GlyphMetrics => {
+      const svg = control.querySelector('svg');
+      const path = svg === null ? null : svg.querySelector('path');
+      if (svg === null || path === null) {
+        throw new Error('the first rail control has no svg path to measure');
+      }
+      return {
+        controlWidth: control.getBoundingClientRect().width,
+        svgWidth: svg.getBoundingClientRect().width,
+        bboxWidth: (path as SVGGraphicsElement).getBBox().width,
+        viewBoxWidth: (svg as SVGSVGElement).viewBox.baseVal.width
+      };
+    });
+
+    // Guard first: the loops below index into this list.
+    expect(frame.controls, detail).toHaveLength(4);
+
+    const gaps = frame.controls
+      .slice(1)
+      .map((control, index) => control.top - frame.controls[index].bottom);
+    const glyphShare =
+      (glyph.bboxWidth / glyph.viewBoxWidth) * (glyph.svgWidth / glyph.controlWidth);
+    const border = borderCoverageOf(geometry);
+
+    // Logged before the assertions, so the numbers are in the report even when
+    // one of them fires.
+    console.log(
+      `wider rail at ${viewport.width}x${viewport.height}: column ` +
+        `${railBox.width.toFixed(2)}x${railBox.height.toFixed(2)}, control ` +
+        `${frame.controls[0].width.toFixed(2)}, gaps ` +
+        `${gaps.map((gap) => gap.toFixed(1)).join('/')}, tiles ` +
+        `${(border.width * 100).toFixed(1)}%/${(border.height * 100).toFixed(1)}% of the panel, ` +
+        `glyph ${(glyphShare * 100).toFixed(1)}% of the control`
+    );
+
+    // The D30 contract, unchanged and re-run: the wider column may not be paid
+    // for out of the grid. Both boxes, because they answer different questions —
+    // the border box is the panel the owner sees, the content box is the area
+    // the grid was handed (AC 5 literally).
+    expectTilesCoverContentBox(geometry, detail);
+    expectTilesFillContent(geometry, detail);
+    expectPanelCoverage(geometry, detail);
+
+    // The column: 96px, not a viewport share, and wholly on screen.
+    expect(railBox.width, detail).toBeGreaterThanOrEqual(RAIL_COLUMN_WIDTH - TOLERANCE);
+    expect(railBox.width, detail).toBeLessThanOrEqual(RAIL_COLUMN_WIDTH + TOLERANCE);
+    expect(railBox.left, detail).toBeGreaterThanOrEqual(0);
+    expect(railBox.right, detail).toBeLessThanOrEqual(frame.innerWidth);
+    expect(railBox.bottom, detail).toBeLessThanOrEqual(frame.innerHeight);
+
+    for (const [index, control] of frame.controls.entries()) {
+      const boxDetail = `${detail}; control ${index} ${JSON.stringify(control)}`;
+
+      // Square, and at least the ticket's new minimum: 80px is bigger than the
+      // 56px `--tap-primary` square the rail used to be, which is the point.
+      expect(Math.abs(control.width - control.height), boxDetail).toBeLessThanOrEqual(TOLERANCE);
+      expect(control.width, boxDetail).toBeGreaterThanOrEqual(CONTROL_SIZE - TOLERANCE);
+
+      // Inside the column that holds it, and inside the panel.
+      expect(control.left, boxDetail).toBeGreaterThanOrEqual(railBox.left - TOLERANCE);
+      expect(control.right, boxDetail).toBeLessThanOrEqual(railBox.right + TOLERANCE);
+      expect(control.top, boxDetail).toBeGreaterThanOrEqual(railBox.top - TOLERANCE);
+      expect(control.bottom, boxDetail).toBeLessThanOrEqual(railBox.bottom + TOLERANCE);
+      expect(control.left, boxDetail).toBeGreaterThanOrEqual(0);
+      expect(control.right, boxDetail).toBeLessThanOrEqual(frame.innerWidth);
+      expect(control.bottom, boxDetail).toBeLessThanOrEqual(frame.innerHeight);
+
+      // Below the header's pills: the rail starts where the body does, so a
+      // control that reached up would paint over the health badges.
+      expect(control.top, boxDetail).toBeGreaterThanOrEqual(headerBox.bottom - TOLERANCE);
+    }
+
+    // No control reaches into the grid. At every landscape panel this is the
+    // strict form (the rail is to the right of the last tile); a portrait panel
+    // is allowed to put the rail anywhere, so the fallback is the explicit
+    // intersection test rather than a looser bound.
+    for (const tile of geometry.tiles) {
+      for (const control of frame.controls) {
+        // The rectangles intersect on both axes: a control painting over a tile.
+        const overlaps =
+          control.right > tile.left + TOLERANCE &&
+          control.left < tile.right - TOLERANCE &&
+          control.bottom > tile.top + TOLERANCE &&
+          control.top < tile.bottom - TOLERANCE;
+        expect(
+          overlaps,
+          `a control paints over a tile — ${detail}; control ${JSON.stringify(control)}, ` +
+            `tile ${JSON.stringify(tile)}`
+        ).toBe(false);
+      }
+    }
+
+    // The owner's explicit requirement: four separate targets, nothing merged.
+    // 16px measured at 100%; the 12px floor exists so a future "tidy-up" cannot
+    // turn the column into one segmented strip without failing here.
+    for (let index = 1; index < frame.controls.length; index += 1) {
+      const above = frame.controls[index - 1];
+      const below = frame.controls[index];
+      expect(
+        below.top - above.bottom,
+        `the gap between control ${index - 1} and ${index} is not preserved — ${detail}; ` +
+          `${(below.top - above.bottom).toFixed(2)}px`
+      ).toBeGreaterThanOrEqual(MIN_GAP);
+    }
+
+    // And nothing merged them structurally: the rail is the controls' direct
+    // parent, so there is no card, strip or grid between them.
+    const parents = await controls.evaluateAll((elements) =>
+      elements.map((element) => element.parentElement?.getAttribute('data-testid') ?? null)
+    );
+    expect(parents, detail).toEqual([
+      'control-rail',
+      'control-rail',
+      'control-rail',
+      'control-rail'
+    ]);
+    expect(
+      await controls.evaluateAll(
+        (elements) => new Set(elements.map((element) => element.parentElement)).size
+      ),
+      detail
+    ).toBe(1);
+
+    for (const [index, name] of names.entries()) {
+      await expect(controls.nth(index), detail).toHaveAccessibleName(name);
+    }
+
+    // The stage stays a description, not a pill: the sentence is in the
+    // accessibility tree and clipped, never painted.
+    await expect(rail, detail).toHaveAccessibleDescription(sentence);
+    await expect(stage, detail).toHaveCount(1);
+    await expect(stage, detail).toHaveText(sentence);
+    expect(await stage.getAttribute('class'), detail).toContain('sr-only');
+    expect(await rail.getAttribute('aria-describedby'), detail).toBe(
+      await stage.getAttribute('id')
+    );
+
+    // The glyph the owner actually sees, not the `svg` box around it: the MDI
+    // volume path fills 19 of 24 viewBox units, so 38.6% of the control is the
+    // measured answer at 100% (it was 33.9% in the old 56px control). The
+    // window is wide enough for a clamp step to pick a different control size
+    // and tight enough to catch a fixed `size` prop coming back.
+    expect(
+      glyphShare,
+      `the painted glyph is ${(glyphShare * 100).toFixed(1)}% of the control, not ~38.6% — ` +
+        `${detail}; ${JSON.stringify(glyph)}`
+    ).toBeGreaterThanOrEqual(0.38);
+    expect(
+      glyphShare,
+      `the painted glyph is ${(glyphShare * 100).toFixed(1)}% of the control, not ~38.6% — ` +
+        `${detail}; ${JSON.stringify(glyph)}`
+    ).toBeLessThanOrEqual(0.44);
   }
 
   watch.assertAllLocal();
