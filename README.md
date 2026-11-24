@@ -1,262 +1,262 @@
 # ChimeDeck
 
-A small, self-hosted chime-and-status panel for [Home Assistant](https://www.home-assistant.io/).
+**Your house already knows what is happening. ChimeDeck is the thing that tells you — out loud,
+in the room you are standing in.**
 
-It runs on the cheap Linux box you already want by the door — a Raspberry Pi, an old
-NUC, a thin client — and does three simple jobs:
+A small self-hosted panel for [Home Assistant](https://www.home-assistant.io/): a wall display that
+shows the handful of things you actually care about, and a speaker Home Assistant can ring for *any*
+event — the doorbell, the laundry finishing, the garage left open at night.
 
-1. **Shows the state of things you care about.** A few large, colourful tiles: is the
-   front door locked, is the garage open, what is the temperature in the kitchen.
-2. **Makes a noise when Home Assistant tells it to.** Home Assistant gets a real
-   `button` entity for each chime you configure. Press the button (from an automation,
-   a dashboard, a physical button, anything) and this device plays the sound — or
-   speaks the sentence — that you chose.
-3. **Lets you point at it.** Tap a tile and it becomes a `switch` in Home Assistant, meaning
-   *"this is the thing I care about right now"*. Your automation can watch that switch, ring a
-   chime, and clear it again — so the policy lives in Home Assistant and the panel only ever
-   records intent.
+![The ChimeDeck dashboard: six tiles showing live Home Assistant state, the control rail on the right, and the Garage Door tile selected](docs/images/dashboard.png)
 
-Think "video doorbell chime, but for every event in my house".
+Live states over the Home Assistant websocket. The rail on the right is volume and settings; the
+blue outline and tick on **Garage Door** is that tile *selected* — which Home Assistant can see.
 
-```
-                    ┌───────────────────────────────┐
-   Home Assistant   │           ChimeDeck           │
-   ┌───────────┐    │  ┌─────────────────────────┐  │
-   │ automation│───▶│  │ MQTT bridge             │  │
-   │  press    │    │  └───────────┬─────────────┘  │
-   └───────────┘    │              ▼                │
-   ┌───────────┐    │  ┌─────────────────────────┐  │
-   │  states   │◀──▶│  │ audio engine → 🔊       │  │
-   └───────────┘    │  └─────────────────────────┘  │
-                    │  ┌─────────────────────────┐  │
-                    │  │ web UI (kiosk browser)  │  │
-                    │  └─────────────────────────┘  │
-                    └───────────────────────────────┘
-```
+|  |  |
+| --- | --- |
+| **Runs on** | any 64-bit Linux box — a Raspberry Pi, an old NUC, a thin client |
+| **Needs** | Python 3.11+, a Home Assistant token, an MQTT broker you already run |
+| **Does not need** | cloud, an account, a subscription, or a beefy CPU |
+| **Ships with** | systemd user units, a kiosk wrapper, Docker images, 2,600+ backend tests, 1,000+ frontend tests, 97 browser tests |
+
+---
+
+## Contents
+
+- [Why you would want this](#why-you-would-want-this)
+- [What it does](#what-it-does)
+- [Point at it, and let Home Assistant do the thinking](#point-at-it-and-let-home-assistant-do-the-thinking)
+- [Install](#install)
+- [Speech, without the subscription](#speech-without-the-subscription)
+- [How it fits together](#how-it-fits-together)
+- [Two listeners, and why that matters](#two-listeners-and-why-that-matters)
+- [Is it true? What the tests actually prove](#is-it-true-what-the-tests-actually-prove)
+- [Documentation](#documentation)
+- [Status](#status)
+
+---
+
+## Why you would want this
+
+A doorbell chime is a single-purpose thing: it makes one noise for one event, for one vendor. Home
+Assistant already knows about every event in the house — the dryer, the gate, the freezer door, the
+front door — so the only missing part is something in the hallway that can *speak*.
+
+ChimeDeck is that something, and it deliberately knows nothing about your rules. It shows what you
+tell it to show, and it plays what you tell it to play. **The policy lives in Home Assistant**, where
+you can already write it, version it, and undo it.
+
+---
 
 ## What it does
 
-- **Status tiles** — pick any Home Assistant entity; the tile shows its icon, name and
-  current state, updating live over the Home Assistant websocket. Tap a tile to highlight it:
-  each highlighted tile appears in Home Assistant as a **switch** you can also set or clear
-  from an automation.
-- **Volume that tells the truth** — loudness is two independent stages, the app's own gain and
-  the output device's hardware level, each with its own slider. "100%" means the device is
-  actually at 100%, which is the failure this pair of sliders exists to prevent.
-- **Chime buttons** — each one appears in Home Assistant as a native device button.
-  Configure what it plays: an audio file, a downloaded sound URL, or a spoken phrase.
-- **Speech you can template** — the spoken phrase can include live Home Assistant values,
-  e.g. *"The garage door is open"*.
-- **Or no speech at all** — sound files only is a completely supported setup, with no
-  synthesiser installed and no nagging.
-- **Speech from wherever suits you** — the device can use Home Assistant's voices, a local
-  neural engine, a renderer on a bigger machine, or a cloud provider. A cheap 1 GB panel is
-  still a capable doorbell because it only has to *play* the audio, never generate it.
-- **Speech that costs nothing to repeat** — a fixed announcement is rendered to audio **once**
-  and reused forever. Pressing the button a thousand times makes one TTS request, not a
-  thousand, so cloud voice quotas last and presses are as fast as playing a local file.
-  Only phrases containing live values are re-rendered per press.
-- **Fits the screen you have** — the layout fills whatever resolution and aspect ratio the panel
-  offers, and an **interface scale** setting (Settings → Appearance) grows the whole UI for a
-  high-DPI display whose mode you cannot change. Touch targets stay finger-sized at the smallest
-  step.
-- **Quiet hours** — stop the 3am chimes, with per-button exceptions for real alarms.
-- **Testable and observable** — every button has a test action, and a press history log
-  tells you what played and when.
-- **No cloud, no account** — it talks to your Home Assistant and your MQTT broker, and
-  to nothing else.
+- **Big, glanceable tiles.** Any Home Assistant entity, with its icon, name and current state, big
+  enough to read from across a room. Numeric entities get units, unavailable entities say so instead
+  of going blank, and every state is a *word*, never colour alone.
+- **Buttons that play sounds or speak.** Each chime appears in Home Assistant as a real device
+  button. Press it from an automation, a dashboard, a physical button — the box plays the sound, or
+  says the sentence, on its own speaker.
+- **Live values in speech.** *"The garage door is still open"* with the actual state read through
+  Home Assistant's own templates, at the moment of the press.
+- **Quiet hours.** No 3am chimes, with per-button exceptions for things that genuinely matter.
+- **A press history.** Every press logged with what played, how long it took and whether it was
+  suppressed — because "did the doorbell actually ring?" should have an answer.
+- **Volume that does not lie.** Software gain and the device's own hardware level are separate
+  sliders, both defaulting to 100, and the panel reports the level the hardware actually reached.
+- **Fits the screen you own.** The layout fills whatever resolution and aspect ratio the panel
+  offers, and an interface-scale setting grows the whole UI for a high-DPI display whose mode you
+  cannot change.
+- **No cloud, no account.** It talks to your Home Assistant and your MQTT broker. Nothing else.
 
-## Requirements
+---
 
-- A 64-bit Linux machine (x86_64 or aarch64 / Raspberry Pi OS 64-bit). 32-bit ARM is
-  not supported.
-- Python 3.11 or newer.
-- An MQTT broker that Home Assistant is already connected to (the Mosquitto add-on is
-  the usual choice).
-- A Home Assistant long-lived access token.
-- Audio hardware on the device itself — the sound plays locally, not in the browser.
+## Point at it, and let Home Assistant do the thinking
 
-### Where does it run?
+Tapping a tile does not open a menu, and it does not do anything in ChimeDeck. It publishes an MQTT
+`switch` — *"this is the thing I care about right now"* — which Home Assistant can watch, act on, and
+clear again.
 
-**On the panel.** One small device with a touchscreen and a speaker runs the whole app —
-UI, MQTT, Home Assistant connection and audio playback. That is the product.
+That one primitive covers the workflow people actually want. Tap **Dryer** when you load it; when
+the load finishes, Home Assistant rings a chime and turns the tile off again:
 
-What you can move off the panel is *speech generation*, if the board is small:
+```yaml
+automation:
+  - alias: "Dryer finished — chime, then clear the tile"
+    triggers:
+      - trigger: state
+        entity_id: switch.chime_deck_dryer
+        to: "on"
+    actions:
+      - action: button.press
+        target:
+          entity_id: button.chime_deck_dryer_done
+      - action: switch.turn_off
+        target:
+          entity_id: switch.chime_deck_dryer
+```
 
-| Engine | Runs where | Needs |
-| --- | --- | --- |
-| `espeak_ng` (apt package `espeak-ng`) | the panel | ~2 MB, robotic but instant |
-| Home Assistant TTS (`ha_tts`) | your Home Assistant | nothing on the panel |
-| Remote renderer (`remote_tts`) | another machine | a token |
-| External provider (`http_tts`) | the vendor's cloud | ships: pick `http_tts` and a provider in Settings → Speech; a paid provider bills per character |
-| Local Piper | the panel | **~2 GB RAM** |
+No doorbell-side logic, no second place to keep rules in sync. Rename the panel, move the tiles
+around, re-flash it — the automation does not change.
 
-So a 1 GB panel is a perfectly good doorbell: it just gets its voice from somewhere else.
-The sound always comes out of the panel — that is the one thing that never moves.
+---
 
-## Quick start
+## Install
 
 ```bash
 git clone https://github.com/insanemal/chime-deck
 cd chime-deck
-
-# system packages (Debian / Raspberry Pi OS)
-sudo apt install libmpv2 libportaudio2 ffmpeg espeak-ng
-
+sudo apt install libmpv2 libportaudio2 ffmpeg espeak-ng   # Debian / Raspberry Pi OS
 uv sync
-uv run chime-deck          # serves http://127.0.0.1:8080
+uv run chime-deck
 ```
 
-### The two listeners
+That is the whole development loop: the server comes up on `http://127.0.0.1:8080`. Open the admin
+listener on `:8081` from your phone or laptop, and the first-run wizard asks for your Home Assistant
+URL and token and your MQTT broker. Nothing needs a config file.
 
-ChimeDeck binds **two** things, and the difference matters:
+<p align="center">
+  <img src="docs/images/settings-entities.png" width="760"
+       alt="Settings → Entities: the tiles shown on the panel, in order, each with its icon and a test action">
+</p>
+
+For the real thing — systemd **user** units, `loginctl enable-linger`, upgrades and backups — see
+[`docs/installing.md`](docs/installing.md). For a panel on a wall, [`docs/kiosk.md`](docs/kiosk.md)
+covers the Chromium wrapper, seat and DRM problems, pinning a display mode, and the case where the
+mode cannot be changed at all.
+
+Docker works too: the multi-stage `Dockerfile` and `deploy/docker-compose.yml` ship, and the release
+workflow publishes `amd64` + `arm64` images on a `v*` tag. The native install is still the
+recommended path, because audio passthrough and the kiosk browser are inherently host-shaped.
+
+---
+
+## Speech, without the subscription
+
+The panel can generate its own voice, borrow Home Assistant's, or ask a bigger machine. What it will
+never do is make you depend on a vendor to hear your own doorbell.
+
+| Engine | Runs where | Needs |
+| --- | --- | --- |
+| `espeak_ng` | the panel | ~2 MB, robotic but instant |
+| `ha_tts` | your Home Assistant | nothing on the panel |
+| `remote_tts` | another Linux box | a token, one command to start |
+| `http_tts` | a cloud provider | an API key; paid providers bill per character |
+| `piper` | the panel | ~2 GB RAM, natural-sounding, offline |
+
+**Speech that costs nothing to repeat.** A phrase with no live values is rendered to audio **once**
+and reused forever, so pressing the button a thousand times makes one TTS request — cloud quotas
+last, and a press is as fast as a local file. Only phrases containing live state are re-rendered per
+press, and the UI warns you when a phrase falls into that category.
+
+A 1 GB panel is therefore a perfectly good doorbell: it only has to *play* audio, never generate it.
+
+---
+
+## How it fits together
+
+```
+                        ┌───────────────────────────────────────┐
+                        │               ChimeDeck               │
+   Home Assistant       │                                       │
+   ┌───────────────┐    │   ┌─────────────────────────────┐     │
+   │ automation:   │───▶│   │ MQTT bridge   ── chime press │     │
+   │ button.press  │    │   └──────────────┬──────────────┘     │
+   └───────────────┘    │                  ▼                    │
+   ┌───────────────┐    │   ┌─────────────────────────────┐     │
+   │ states ◀────▶ │◀──▶│   │ audio engine → 🔊 speaker   │     │
+   │ switch (tap)  │    │   └─────────────────────────────┘     │
+   └───────────────┘    │   ┌─────────────────────────────┐     │
+                        │   │ web UI ── kiosk on the wall  │     │
+                        │   └─────────────────────────────┘     │
+                        └───────────────────────────────────────┘
+```
+
+One Python process serves the dashboard, holds the Home Assistant websocket, owns the MQTT
+connection and drives the audio engine. The browser is a renderer, not an audio path — the sound
+always comes out of the box itself, which is the one thing that never moves elsewhere.
+
+---
+
+## Two listeners, and why that matters
 
 | Listener | Default | Serves |
 | --- | --- | --- |
-| app | `127.0.0.1:8080` | everything: the dashboard the kiosk shows, the API, the live websocket |
+| app | `127.0.0.1:8080` | everything: the dashboard, the API, the live websocket |
 | admin | `0.0.0.0:8081` | configuration only — `/` redirects to `/settings` |
 
-The dashboard is deliberately **loopback-only**: it carries no authentication, because a wall
-display cannot log in, so it must never be reachable from the network. The admin listener is the
-one you open from your phone or laptop to configure the panel, and it asks for a password once you
-have set one. If your Home Assistant is on another machine, that is the page you use.
+The dashboard is deliberately **loopback-only and unauthenticated**, because a wall display cannot
+log in — so it must never be reachable from the network. The admin listener is the one you open from
+a phone or laptop, and it takes a password. If someone hands you a screenshot of a ChimeDeck
+dashboard on the LAN, something is misconfigured.
 
-First run, open the admin listener and the wizard asks for what it needs — your Home Assistant URL
-and token, and your MQTT broker — then picks the tiles and chimes you want. Nothing needs a config
-file. A few CC0 demo sounds ship so the first press makes a noise; replace them with your own.
+---
 
-```bash
-curl -fsS http://127.0.0.1:8080/api/health     # the app is up
-```
+## Is it true? What the tests actually prove
 
-The frontend is complete and ships with it: the built bundle is committed in `web/dist/`, so a
-fresh clone needs no Node.js, and the dashboard, settings screens and first-run wizard are all
-served from the same process.
+Five tiers, and every result says which one it came from:
 
-### Rendering speech on another machine
+| Tier | Command | Proves |
+| --- | --- | --- |
+| Unit | `uv run pytest -q` | logic, parsing and error paths — fully stubbed, offline, seconds |
+| Integration | `./scripts/test-integration.sh` | real `espeak-ng`, real `libmpv`, real `ffmpeg` in a container |
+| aarch64 | `./scripts/test-integration.sh --board` | the same on the target architecture |
+| Frontend | `cd web && npm run verify` | types, WCAG contrast in both themes, component tests, and that the committed bundle is byte-identical to a fresh build |
+| Browser | `cd web && npm run test:browser` | the real UI in a real browser against the **real backend** — taps, the rail, settings, live state |
 
-A small panel can borrow the voice of a bigger box: run `chime-deck --role renderer`
-there, and it binds to localhost unless `--host` says otherwise. The renderer refuses to
-start until `tts.renderer.token` is set in that data directory's settings, so set it once by
-running the server role against the same `--data-dir`, then put the same value in
-`tts.remote_tts.token` on the panel along with the renderer's address in
-`tts.remote_tts.url`, and choose `remote_tts` as the speech engine. That token is its only
-authentication, so never port-forward it.
-
-### Working on the UI
-
-`cd web && npm ci && npm run dev`, and open `/gallery` for the component
-gallery (dev server only — it is tree-shaken out of the production bundle). `npm run build`
-writes `web/dist/`, and `npm run verify` runs every frontend check (types, WCAG contrast for
-both themes, gallery coverage, build, bundle checks).
-
-Full installation instructions live in [`docs/installing.md`](docs/installing.md): system
-packages, `uv sync`, the systemd **user** unit and `loginctl enable-linger`, upgrades and
-backups, and the two topologies (the panel always runs the app and always makes the sound;
-only speech synthesis can be offloaded). Kiosk setup has its own guide in
-[`docs/kiosk.md`](docs/kiosk.md), and cutting a release — including the multi-arch container
-images it publishes — is in [`docs/releasing.md`](docs/releasing.md).
-
-### Docker (supported, not recommended)
-
-Docker works, and the files ship: the multi-stage `Dockerfile` at the repository root and
-`deploy/docker-compose.yml`. The native install above is still the recommended path — ten
-minutes, no Docker — because every awkward part of running this in a container is
-host-specific:
-
-- **Audio passthrough.** A plain ALSA host needs `/dev/snd` and the `audio` group; a desktop
-  or a PipeWire/PulseAudio box needs the user's socket and, unavoidably, that machine's UID
-  in the mount path.
-- **`./data` is a UID-mapped bind mount.** The container user must be the host user that
-  owns the directory, so the image takes `UID`/`GID` build args.
-- **The compose file builds from the checkout.** That is deliberate: the shipped file cannot
-  know which owner you pull from. The release workflow publishes multi-arch (`amd64` +
-  `arm64`) images to `ghcr.io/<owner>/chime-deck` on every `v*` tag — see
-  [releasing.md](docs/releasing.md) for the tag list and how to point the compose file at one.
-  No release has been tagged yet, so those images are a verified capability rather than something
-  you can pull today; the compose file builds from your checkout.
-
-**The kiosk browser cannot live in the container.** Chromium needs the host's display, seat
-and DRM devices, so run the kiosk on the host ([kiosk.md](docs/kiosk.md)) and point it at
-`http://127.0.0.1:8080`.
-
-[`docs/installing.md`](docs/installing.md) §11 has the commands; the caveats and the design
-behind them are in `Project_state/design/06-deployment.md` §6.
-
-## Testing
-
-Five tiers, and every result should say which one it came from.
-
-| Tier | Command | Runs where | Proves |
-| --- | --- | --- | --- |
-| Unit | `uv run pytest -q` | your machine | logic, parsing, error paths — everything stubbed, offline, seconds |
-| Integration | `./scripts/test-integration.sh` | a container | real `espeak-ng`, real `libmpv`, real `ffmpeg`, real file handling, ~1 minute |
-| aarch64 | `./scripts/test-integration.sh --board` | the ARM board | the same on the target architecture and CPU |
-| Frontend | `cd web && npm run verify` | your machine | types, WCAG contrast in both themes, gallery and storyboard coverage, component tests, build, and that the committed `web/dist` is byte-identical to a fresh build |
-| Browser | `cd web && npm run test:browser` | your machine | the real UI in a real browser against a real backend: taps, the control rail, settings, selection round trips |
-
-```bash
-uv run pytest -q                           # unit tier, no system packages needed
-uv run pytest -q -m integration            # only the integration tests (skips what is missing)
-./scripts/test-integration.sh              # integration tier in Docker
-./scripts/test-integration.sh -- -k audio  # pass arguments through to pytest
-./scripts/test-integration.sh --board      # rsync the tree to the board and run it there
-./scripts/test-integration.sh --arm64-image  # arm64 correctness under QEMU, no timing claims
-cd web && npm ci && npm run verify         # every frontend check, including check-dist
-cd web && npm run test:browser             # Playwright; run it twice, timing bugs hide on the first run
-```
-
-The board workflow is the two steps the script automates, per design 07 §6:
-`rsync` the tree to `~/sd-test` on the board, then
-`uv sync --frozen && uv run pytest -q` there. The board needs `ffmpeg` and `libmpv2`
-installed for the audio-format tier.
-
-Two honest limits, from design 07 §3. The container plays to `--ao=null`, so "it plays"
-means "it decoded and played to a null sink" — never audible output — and a container has
-no systemd or PipeWire user session. The board is real aarch64 playing to real sinks, but a
-"played" outcome there still is not "heard": only a person in the room can confirm that, which is
-why audible acceptance is a separate, owner-assisted tier rather than a test. The full reference is
+Two honest limits, stated rather than glossed: a container plays to a null sink, so "it played" there
+means "it decoded and played", never "it was heard"; and the aarch64 board plays to real hardware,
+but only a person in the room can confirm it was audible. That is why audible acceptance is a
+separate, owner-assisted pass rather than a test. The full reference is
 `Project_state/design/07-testing.md`.
 
-## Where things live
+---
+
+## Documentation
+
+| | |
+| --- | --- |
+| [installing.md](docs/installing.md) | packages, the systemd user unit, upgrades, backups, Docker |
+| [home-assistant.md](docs/home-assistant.md) | entities, the selection switch contract, automations, troubleshooting |
+| [kiosk.md](docs/kiosk.md) | the display: seat and DRM problems, pinning a mode, interface scale |
+| [releasing.md](docs/releasing.md) | what a `v*` tag builds and publishes |
+
+If you want to work on it:
 
 | Path | What |
 | --- | --- |
-| `src/chime_deck/` | Python backend (FastAPI, MQTT bridge, audio engine, TTS) |
-| `tests/` | pytest suite (unit, integration and slow markers) |
-| `web/` | Svelte 5 frontend: dashboard, control rail, settings and first-run wizard; the built bundle is committed in `web/dist/` |
-| `deploy/` | systemd user units (`chime-deck.service`, `chime-deck-kiosk.service`), the kiosk wrapper and its autostart entry, and the Docker compose file (`docker-compose.yml`) |
-| `docs/` | Operator guides: [`installing.md`](docs/installing.md), [`home-assistant.md`](docs/home-assistant.md), [`kiosk.md`](docs/kiosk.md), [`releasing.md`](docs/releasing.md) |
-| `Dockerfile` | Multi-stage build from the repo root: the product image, the `:piper` tag and the integration harness, all from one file |
-| `data/` | Runtime state: database, sounds, icons, TTS cache (*git-ignored*) |
-| `Project_state/` | Architecture, design docs and decisions (*git-ignored*) |
+| `src/chime_deck/` | the Python backend: FastAPI, MQTT bridge, audio engine, TTS |
+| `web/` | the Svelte 5 frontend; the built bundle in `web/dist` is committed, so a clone needs no Node.js to run |
+| `tests/` | the pytest suite |
+| `deploy/` | systemd user units, the kiosk wrapper, the compose file |
+| `data/` | runtime state: database, sounds, icons, TTS cache *(git-ignored)* |
+
+---
 
 ## Status
 
-**Working and in daily use.** The features above are implemented, tested and running on a real
-panel: tiles, selectable switches, chime buttons, MQTT discovery, the Home Assistant REST and
-websocket clients, the audio engine, five TTS engines, quiet hours, the dashboard and settings
-UI, systemd units, the kiosk wrapper, the Docker build and the release workflow (dry-run
-verified; no tag cut yet).
+**Working, and in daily use.** Everything above is implemented, tested and running on a real panel:
+tiles, selection switches, chime buttons, MQTT discovery, the Home Assistant REST and websocket
+clients, the audio engine, five TTS engines, quiet hours, the dashboard and settings UI, the setup
+wizard, systemd units, the kiosk wrapper and the Docker build.
 
-Nothing in the core is missing. What remains on the backlog is an all-in-one flashable image with
-first-boot Wi-Fi provisioning, and kernel-level polish. Two honest limits: the reference panel has
-been verified by one person's ears, not a lab, and the container and aarch64 test tiers can prove a
-sound *decoded and played*, never that it was *heard* (see Testing below).
+What is left on the backlog is an all-in-one flashable image with first-boot Wi-Fi provisioning, and
+polish. Not missing functionality.
+
+---
 
 ## Licence
 
 The project's own code is MIT — see [LICENSE](LICENSE).
 
 The Docker images bundle third-party copyleft binaries on top of it, and their
-`org.opencontainers.image.licenses` label says so: `MIT AND LGPL-2.1-or-later AND
-GPL-2.0-or-later AND GPL-3.0-or-later`. `espeak-ng` (GPL-3.0-or-later), `libmpv2` and `ffmpeg`
-come from the Debian base image in *both* tags, so "MIT-only image" would be false of either.
+`org.opencontainers.image.licenses` label says so: `MIT AND LGPL-2.1-or-later AND GPL-2.0-or-later AND
+GPL-3.0-or-later`. `espeak-ng` (GPL-3.0-or-later), `libmpv2` and `ffmpeg` come from the Debian base
+image in *both* tags, so "MIT-only image" would be false of either.
 
-What the separate `:piper` tag exists for is the optional local Piper TTS engine
-(`piper-tts`, GPL-3.0-or-later), which is never bundled in a default install: it is an opt-in
-extra (`uv sync --extra piper`) or that second tag. Neither tag bakes a voice model — voice
-models are licensed separately, the licence varies per voice, and the app downloads the one you
-choose, showing its licence in the Speech panel.
+What the separate `:piper` tag exists for is the optional local Piper TTS engine (`piper-tts`,
+GPL-3.0-or-later), which is never bundled in a default install: it is an opt-in extra
+(`uv sync --extra piper`) or that second tag. Neither tag bakes a voice model — voice models are
+licensed separately, the licence varies per voice, and the app downloads the one you choose, showing
+its licence in the Speech panel.
 
 Bundled demo sounds are CC0/public domain, with sources recorded alongside them.
