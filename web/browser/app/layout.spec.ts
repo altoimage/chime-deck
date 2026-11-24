@@ -115,6 +115,25 @@ const SCALE_VIEWPORTS = [
 /** The smallest step: every tap floor is measured here (AC 6). */
 const SMALLEST_SCALE = 85;
 
+/**
+ * The three panels the control rail is measured on.
+ *
+ * The first two are the sizes the ticket names: the reference panel the owner
+ * measured the rail at, and the wall panel. Portrait is the third because D30
+ * already asks every fixed floor to hold there, and the rail is one of those
+ * floors (`--tap-primary` square controls in a fixed column).
+ *
+ * A third constant, not `MATRIX`: the browser tier runs serially under a 300s
+ * global timeout, and this test needs the three shapes the ticket names, not all
+ * seven. Adding these to `MATRIX` would also change what the fill tests assert
+ * there, for the same reason `VIEWPORTS` and `MATRIX` stay apart.
+ */
+const RAIL_VIEWPORTS = [
+  { width: 1280, height: 720 }, // the reference panel, where the owner measured it
+  { width: 1024, height: 600 }, // the wall panel
+  { width: 720, height: 1280 } // portrait (D30)
+] as const;
+
 /** The off-origin watch the `beforeEach` attached; asserted at the end of each test. */
 let watch: OffOriginWatch;
 
@@ -436,6 +455,25 @@ async function applyScale(request: APIRequestContext, step: ScaleStep): Promise<
 }
 
 /**
+ * Store `audio.rail_target` through the real settings PATCH, like `applyScale`.
+ *
+ * No restore is needed in `afterEach`: `audio.rail_target` **is** part of the
+ * bench's `CANONICAL_SETTINGS`, so `/__test/reset` writes `software` back. That
+ * is the difference from `ui.scale` and `ui.dashboard_columns`, which the reset
+ * does not restore and which therefore need their own restore calls.
+ *
+ * @param request the test's API request context.
+ * @param target the stage the rail's volume buttons must act on.
+ */
+async function applyRailTarget(
+  request: APIRequestContext,
+  target: 'software' | 'hardware'
+): Promise<void> {
+  const patch = await request.patch('/api/settings', { data: { 'audio.rail_target': target } });
+  expect(patch.ok(), await patch.text()).toBe(true);
+}
+
+/**
  * Wait until the document is rendering at *step* and assert both halves of it.
  *
  * The attribute is the input (`tokens.css` turns it into `--ui-scale`) and the
@@ -505,9 +543,16 @@ interface RenderedGeometry {
   readonly tileIcon: BoxRect;
   /** Whether the first tile's `.card` keeps its own content inside itself. */
   readonly cardFits: boolean;
+  /**
+   * The rail's own **border box**: the fixed column (D28) those controls sit in.
+   *
+   * This is what the file used to spend on a caption pill's *width*, and its
+   * width is now the size assertion itself: 72 layout px at 100% and at 130%,
+   * i.e. 93.6 **rendered** px at 130%, because the column is a token sum rather
+   * than a viewport share.
+   */
   readonly rail: BoxRect | null;
   readonly railButton: BoxRect | null;
-  readonly railCaptionWidth: number | null;
   readonly docScrollHeight: number;
   readonly docClientHeight: number;
   readonly docScrollWidth: number;
@@ -573,7 +618,6 @@ async function measureRendered(page: Page): Promise<RenderedGeometry> {
 
     const rail = document.querySelector('[data-testid="control-rail"]');
     const railButton = rail === null ? null : rail.querySelector('button');
-    const caption = rail === null ? null : rail.querySelector('[data-testid="rail-volume-target"]');
     const scrolling = document.scrollingElement ?? document.documentElement;
 
     return {
@@ -585,7 +629,6 @@ async function measureRendered(page: Page): Promise<RenderedGeometry> {
         card.scrollHeight <= card.clientHeight + 1 && card.scrollWidth <= card.clientWidth + 1,
       rail: rail === null ? null : boxOf(rail),
       railButton: railButton === null ? null : boxOf(railButton),
-      railCaptionWidth: caption === null ? null : advanceOf(caption, 'control rail caption'),
       docScrollHeight: scrolling.scrollHeight,
       docClientHeight: scrolling.clientHeight,
       docScrollWidth: scrolling.scrollWidth,
@@ -596,6 +639,27 @@ async function measureRendered(page: Page): Promise<RenderedGeometry> {
       zoom: getComputedStyle(document.documentElement).zoom
     };
   });
+}
+
+/**
+ * The control rail's own box, its overflow metrics and the text it paints.
+ *
+ * `visibleTexts` is a list rather than a boolean so a failure names the text that
+ * should not be there. Both scroll metrics are collected because the rail is a
+ * fixed column: it can overflow vertically (too many controls for the panel) as
+ * easily as horizontally, and only one of those would show up in a screenshot.
+ */
+interface RailGeometry {
+  /** The rail's **border box**: the fixed column itself. */
+  readonly rail: BoxRect;
+  readonly scrollWidth: number;
+  readonly scrollHeight: number;
+  readonly clientWidth: number;
+  readonly clientHeight: number;
+  /** Every direct non-whitespace text node in the subtree, outside `.sr-only`. */
+  readonly visibleTexts: ReadonlyArray<{ readonly tag: string; readonly text: string }>;
+  /** The clipped stage sentence, whitespace-collapsed. */
+  readonly stageText: string;
 }
 
 /** Every tile's and every `.card`'s painted box, plus the content scroller. */
@@ -1800,8 +1864,8 @@ test('ui.scale multiplies the interface once, not twice, and D30 stays scale-inv
     if (base.railButton === null || scaled.railButton === null) {
       throw new Error(`the control rail has no button to measure — ${detail}`);
     }
-    if (base.railCaptionWidth === null || scaled.railCaptionWidth === null) {
-      throw new Error(`the control rail has no volume-target caption to measure — ${detail}`);
+    if (base.rail === null || scaled.rail === null) {
+      throw new Error(`the control rail has no box to measure — ${detail}`);
     }
 
     // D30 invariance: the tile's internals keep their relationship to the tile's
@@ -1874,33 +1938,30 @@ test('ui.scale multiplies the interface once, not twice, and D30 stays scale-inv
       `the rail button's height moved by ${buttonRatio.toFixed(3)}×, not 1.3× — ${detail}`
     ).toBeLessThanOrEqual(1.33);
 
-    const captionRatio = ratio(
-      'rail caption width',
-      base.railCaptionWidth,
-      scaled.railCaptionWidth
-    );
+    const railRatio = ratio('rail column width', base.rail.width, scaled.rail.width);
     expect(
-      captionRatio,
-      `the rail caption's width moved by ${captionRatio.toFixed(3)}×, not 1.3× ` +
-        `(${base.railCaptionWidth.toFixed(2)} -> ${scaled.railCaptionWidth.toFixed(2)} rendered px) ` +
+      railRatio,
+      `the rail column's width moved by ${railRatio.toFixed(3)}×, not 1.3× ` +
+        `(${base.rail.width.toFixed(2)} -> ${scaled.rail.width.toFixed(2)} rendered px) ` +
         `— ${detail}`
-    ).toBeGreaterThanOrEqual(1.24);
+    ).toBeGreaterThanOrEqual(1.27);
     expect(
-      captionRatio,
-      `the rail caption's width moved by ${captionRatio.toFixed(3)}×, not 1.3× — ${detail}`
-    ).toBeLessThanOrEqual(1.36);
+      railRatio,
+      `the rail column's width moved by ${railRatio.toFixed(3)}×, not 1.3× — ${detail}`
+    ).toBeLessThanOrEqual(1.33);
 
-    // Text and its box moved by the same factor: if only the text had moved
-    // twice, the caption would have grown inside a box that grew once, and this
-    // ratio would be off by the second factor.
-    const captionOfButton = {
-      base: base.railCaptionWidth / base.railButton.height,
-      scaled: scaled.railCaptionWidth / scaled.railButton.height
+    // The column and the control inside it moved by the same factor: if only one
+    // had moved twice, or if the column had kept a px width laid out inside the
+    // zoomed space, this ratio would move. 72/56 — one primary tap target plus two
+    // small gaps against that target — must stay put at every step.
+    const railOfButton = {
+      base: base.rail.width / base.railButton.height,
+      scaled: scaled.rail.width / scaled.railButton.height
     };
     expect(
-      Math.abs(captionOfButton.scaled / captionOfButton.base - 1),
-      `the caption's size relative to its button changed from ${captionOfButton.base.toFixed(4)} ` +
-        `to ${captionOfButton.scaled.toFixed(4)} — ${detail}`
+      Math.abs(railOfButton.scaled / railOfButton.base - 1),
+      `the rail column's size relative to its control changed from ${railOfButton.base.toFixed(4)} ` +
+        `to ${railOfButton.scaled.toFixed(4)} — ${detail}`
     ).toBeLessThanOrEqual(0.02);
 
     // And explicitly not 1.69 anywhere: that is the number a second factor would
@@ -1910,8 +1971,8 @@ test('ui.scale multiplies the interface once, not twice, and D30 stays scale-inv
       { label: 'icon/height invariance', value: iconShare.scaled / iconShare.base },
       { label: 'tile word width', value: textRatio },
       { label: 'rail button height', value: buttonRatio },
-      { label: 'rail caption width', value: captionRatio },
-      { label: 'caption of button', value: captionOfButton.scaled / captionOfButton.base }
+      { label: 'rail column width', value: railRatio },
+      { label: 'rail column of button', value: railOfButton.scaled / railOfButton.base }
     ] as const;
     for (const { label, value } of measured) {
       expect(
@@ -1932,8 +1993,8 @@ test('ui.scale multiplies the interface once, not twice, and D30 stays scale-inv
         `${(scaled.tileIcon.width / scaled.tile.width).toFixed(4)}), ` +
         `rail button ${base.railButton.height.toFixed(1)} -> ` +
         `${scaled.railButton.height.toFixed(1)} (${buttonRatio.toFixed(3)}×), ` +
-        `caption ${base.railCaptionWidth.toFixed(1)} -> ` +
-        `${scaled.railCaptionWidth.toFixed(1)} (${captionRatio.toFixed(3)}×)`
+        `rail column ${base.rail.width.toFixed(1)} -> ` +
+        `${scaled.rail.width.toFixed(1)} (${railRatio.toFixed(3)}×)`
     );
   }
 
@@ -2269,6 +2330,261 @@ test('ui.scale scales sheets and the settings screens', async ({ page, request }
       `bottom sheet ${bottomSheet.rect.width.toFixed(0)}x${bottomSheet.rect.height.toFixed(0)} ` +
       `in ${bottomSheet.innerWidth}x${bottomSheet.innerHeight}`
   );
+
+  watch.assertAllLocal();
+});
+
+/**
+ * The control rail: four 56px controls in a fixed 72px column (D28), with no
+ * visible text left to clip and the volume stage in the accessibility tree
+ * instead of on the wall display.
+ *
+ * cd-qpg6 shipped twice. The first pass sized the caption pill to its word and
+ * let the column grow with it -- an elaborate proof that a word can be made to
+ * fit at 5px more. The owner overruled the whole shape of that fix ("are the
+ * volume controls still there? They need to be. But the text 'software' or
+ * whatever should be in the config somewhere if anywhere"): the label belongs in
+ * Settings -> Audio, so the rail has no caption and nothing to clip. These
+ * assertions therefore pin the *absence* -- the overflow cannot come back without
+ * a visible text node in the rail failing clause 3 -- as well as the box the
+ * removed pill used to widen.
+ */
+test('the control rail is four 56px controls in a 72px column with no text to clip', async ({
+  page,
+  request
+}) => {
+  // Eight page loads (six measured panels, two behaviour taps) plus the real
+  // backend reads behind each one: the default 60s per test is not enough
+  // headroom for the tier's own 300s global budget.
+  test.setTimeout(120_000);
+
+  /** `--rail-column`: `--tap-primary` plus one `--gap-sm` either side (D28). */
+  const RAIL_COLUMN_WIDTH = 72;
+  /** `--tap-primary`: the square each control is painted at. */
+  const CONTROL_SIZE = 56;
+  /**
+   * Sub-pixel tolerance. `getBoundingClientRect()` returns fractions of a layout
+   * px, and the rail is a `calc()` of two tokens, so the honest number is "72 to
+   * within rounding" rather than exactly 72.0.
+   */
+  const TOLERANCE = 0.5;
+
+  const rail = page.locator('[data-testid="control-rail"]');
+  const stage = page.locator('[data-testid="rail-volume-stage"]');
+  const removedPill = page.locator('[data-testid="rail-volume-target"]');
+  const controls = rail.locator('.control');
+
+  // `audio.muted` is not one of the bench's canonical settings, so the mute
+  // button's accessible name depends on whatever the previous spec left behind.
+  // Seed it false: this test asserts the name, not the toggle order.
+  const unmuted = await request.patch('/api/settings', { data: { 'audio.muted': false } });
+  expect(unmuted.ok(), await unmuted.text()).toBe(true);
+
+  for (const target of ['software', 'hardware'] as const) {
+    for (const { width, height } of RAIL_VIEWPORTS) {
+      await applyRailTarget(request, target);
+      await page.setViewportSize({ width, height });
+      await page.goto('/');
+      // Auto-retrying on the real snapshot, never a bare timeout: a measurement
+      // must never describe a page that has not finished loading.
+      await expect(page.locator(LIVE_TILES)).toHaveCount(SEED.length);
+
+      const measured = await page.evaluate((): RailGeometry => {
+        function boxOf(element: Element): BoxRect {
+          const rect = element.getBoundingClientRect();
+          return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height
+          };
+        }
+
+        const root = document.querySelector('[data-testid="control-rail"]');
+        if (root === null) {
+          throw new Error('the dashboard has no control rail to measure');
+        }
+
+        /*
+         * Text that is *visible* on the wall display: a direct child text node
+         * with something in it, unless the node sits inside the `.sr-only` clip.
+         * `sr-only` is a 1px clip, not `display: none`, so the sentence still
+         * contributes to `textContent` and is still announced -- what it never
+         * does is paint. A caption pill re-added to the rail shows up here as a
+         * non-empty entry, which is the point of collecting the list rather than
+         * asserting `textContent` is empty.
+         */
+        const visibleTexts: Array<{ tag: string; text: string }> = [];
+        for (const element of [root, ...root.querySelectorAll('*')]) {
+          if (element.closest('.sr-only') !== null) {
+            continue;
+          }
+          const directText = [...element.childNodes]
+            .filter((node) => node.nodeType === Node.TEXT_NODE)
+            .map((node) => node.textContent ?? '')
+            .join('')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (directText !== '') {
+            visibleTexts.push({ tag: element.tagName.toLowerCase(), text: directText });
+          }
+        }
+
+        const stageNode = root.querySelector('[data-testid="rail-volume-stage"]');
+
+        return {
+          rail: boxOf(root),
+          scrollWidth: root.scrollWidth,
+          scrollHeight: root.scrollHeight,
+          clientWidth: root.clientWidth,
+          clientHeight: root.clientHeight,
+          visibleTexts,
+          stageText: (stageNode?.textContent ?? '').replace(/\s+/g, ' ').trim()
+        };
+      });
+
+      const detail =
+        `${target} rail at ${width}x${height}: rail ${JSON.stringify(measured.rail)}, ` +
+        `scroll ${measured.scrollWidth}x${measured.scrollHeight}, ` +
+        `client ${measured.clientWidth}x${measured.clientHeight}, ` +
+        `visible text ${JSON.stringify(measured.visibleTexts)}, ` +
+        `stage ${JSON.stringify(measured.stageText)}`;
+
+      // Logged before the assertions, so the numbers are in the report even when
+      // one of them fires.
+      console.log(
+        `rail ${target} at ${width}x${height}: column ` +
+          `${measured.rail.width.toFixed(2)}x${measured.rail.height.toFixed(2)}, ` +
+          `scroll ${measured.scrollWidth} -> client ${measured.clientWidth}, ` +
+          `visible text nodes ${measured.visibleTexts.length}`
+      );
+
+      // The column the removed pill used to widen: a fixed 72px, not a
+      // viewport share and not a shrink-to-fit around a word.
+      expect(measured.rail.width, detail).toBeGreaterThanOrEqual(RAIL_COLUMN_WIDTH - TOLERANCE);
+      expect(measured.rail.width, detail).toBeLessThanOrEqual(RAIL_COLUMN_WIDTH + TOLERANCE);
+
+      // Nothing in the rail overflows it -- the fill contract's own rule, applied
+      // to the column that sits beside the tiles.
+      expect(measured.scrollWidth, detail).toBeLessThanOrEqual(measured.clientWidth);
+      expect(measured.scrollHeight, detail).toBeLessThanOrEqual(measured.clientHeight);
+
+      // Clause 3: the rail paints no text at all. This is the assertion that
+      // fails if a caption pill is ever put back on the wall display, and it is
+      // what fails on the pre-change bundle, where the pill reads `Software`.
+      expect(measured.visibleTexts, detail).toEqual([]);
+
+      // The four controls, in order, unchanged. Their order is the rail's
+      // contract: ⬆, ⬇, mute, then the gear that navigates away.
+      await expect(controls).toHaveCount(4);
+      const testIds = await controls.evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute('data-testid'))
+      );
+      expect(testIds, detail).toEqual([
+        'rail-volume-up',
+        'rail-volume-down',
+        'rail-mute',
+        'rail-settings'
+      ]);
+
+      const names = [
+        `Turn ${target} volume up`,
+        `Turn ${target} volume down`,
+        'Mute',
+        'Settings'
+      ] as const;
+      const roles = ['button', 'button', 'button', 'link'] as const;
+
+      for (let index = 0; index < names.length; index += 1) {
+        const control = controls.nth(index);
+        const box = await renderedBoxOf(control);
+        const boxDetail = `${detail}; control ${index} ${JSON.stringify(box)}`;
+
+        // 56×56 is `--tap-primary`: a primary tap target, square, at every panel
+        // size in `RAIL_VIEWPORTS`.
+        expect(box.width, boxDetail).toBeGreaterThanOrEqual(CONTROL_SIZE - TOLERANCE);
+        expect(box.width, boxDetail).toBeLessThanOrEqual(CONTROL_SIZE + TOLERANCE);
+        expect(box.height, boxDetail).toBeGreaterThanOrEqual(CONTROL_SIZE - TOLERANCE);
+        expect(box.height, boxDetail).toBeLessThanOrEqual(CONTROL_SIZE + TOLERANCE);
+
+        // And inside the column that holds it, so a control can never paint over
+        // the tiles beside the rail.
+        expect(box.left, detail).toBeGreaterThanOrEqual(measured.rail.left - TOLERANCE);
+        expect(box.right, detail).toBeLessThanOrEqual(measured.rail.right + TOLERANCE);
+        expect(box.top, detail).toBeGreaterThanOrEqual(measured.rail.top - TOLERANCE);
+        expect(box.bottom, detail).toBeLessThanOrEqual(measured.rail.bottom + TOLERANCE);
+
+        // The name is the rail's only per-stage cue now, and it is computed by
+        // the ARIA algorithm rather than read off an attribute, so a control that
+        // lost its `aria-label` fails here.
+        await expect(control).toHaveAccessibleName(names[index]);
+        await expect(
+          page.getByRole(roles[index], { name: names[index], exact: true })
+        ).toHaveCount(1);
+      }
+
+      // The stage survives as the group's description: `aria-describedby` plus a
+      // clipped sentence, which is announced but never painted.
+      // `toHaveAccessibleDescription` runs the ARIA algorithm over the referenced
+      // node, so this asserts the sentence is in the accessibility tree rather
+      // than merely in the DOM (a `display: none` target would resolve to
+      // nothing).
+      const sentence = `The volume buttons change ${target} volume.`;
+      await expect(rail).toHaveAccessibleDescription(sentence);
+      expect(measured.stageText, detail).toBe(sentence);
+
+      await expect(removedPill).toHaveCount(0);
+      await expect(stage).toHaveCount(1);
+      await expect(stage).toHaveText(sentence);
+    }
+  }
+
+  // And the four controls still ACT. Behaviour is viewport-independent, so this
+  // runs once per stage rather than six times: one tap, one PATCH, one key.
+  //
+  // Each stage is seeded from the reset baseline (both volumes are 100) to a
+  // value with room above it, so the echoed number is a literal instead of a
+  // read-back that a broken tap could satisfy.
+  const taps = [
+    { target: 'software', key: 'audio.volume', seeded: 70, expected: 75 },
+    { target: 'hardware', key: 'audio.hardware_volume', seeded: 40, expected: 45 }
+  ] as const;
+
+  for (const { target, key, seeded, expected } of taps) {
+    const seed = await request.patch('/api/settings', { data: { [key]: seeded } });
+    expect(seed.ok(), await seed.text()).toBe(true);
+
+    await applyRailTarget(request, target);
+    await page.setViewportSize({ ...PANEL });
+    await page.goto('/');
+    await expect(page.locator(LIVE_TILES)).toHaveCount(SEED.length);
+
+    const patched = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === '/api/settings' &&
+        response.request().method() === 'PATCH'
+    );
+    await page
+      .getByRole('button', { name: `Turn ${target} volume up`, exact: true })
+      .click();
+    const response = await patched;
+    expect(response.ok(), await response.text()).toBe(true);
+
+    // The rail sends a *diff*, so one key per tap is the contract: a stage switch
+    // that leaked the other volume, or a mute flag riding along, would still save
+    // something -- just the wrong something.
+    const sent = response.request().postDataJSON() as Record<string, unknown>;
+    const sentKeys = Object.keys(sent);
+    expect(sentKeys, `${target} tap PATCHed ${JSON.stringify(sent)}`).toHaveLength(1);
+    expect(sentKeys[0]).toBe(key);
+
+    // And the echo is the value this tap asked for: `stepVolume` is +5, clamped to
+    // the 0..100 range.
+    const body = (await response.json()) as { settings?: Record<string, unknown> };
+    expect(body.settings?.[key], `${target} tap on ${key} at ${seeded}`).toBe(expected);
+  }
 
   watch.assertAllLocal();
 });

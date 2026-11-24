@@ -217,6 +217,16 @@ function buttonByAriaLabel(label: string): HTMLButtonElement {
   return button;
 }
 
+function fieldsetByLegend(label: string): HTMLFieldSetElement {
+  const fieldset = [...document.querySelectorAll<HTMLFieldSetElement>('fieldset')].find(
+    (candidate) => candidate.querySelector('legend')?.textContent?.trim() === label
+  );
+  if (fieldset === undefined) {
+    throw new Error(`expected a fieldset legended "${label}"`);
+  }
+  return fieldset;
+}
+
 function selectTrigger(label: string): HTMLButtonElement {
   const button = [...document.querySelectorAll<HTMLButtonElement>('button.trigger')].find((candidate) => {
     const ids = candidate.getAttribute('aria-labelledby')?.split(/\s+/) ?? [];
@@ -549,6 +559,28 @@ describe('two-stage output volume', () => {
       'audio.rail_target': 'hardware',
       'audio.hardware_control': 'Speaker'
     });
+
+    // cd-qpg6: this control is now the only place the rail's target is explained,
+    // because the dashboard rail lost its visible caption. It therefore has to
+    // document itself: a legend that says what the buttons do, option labels that
+    // name a stage rather than an implementation, and a hint wired up with
+    // aria-describedby so the explanation reaches a screen reader with the
+    // fieldset instead of floating loose in the card.
+    const fieldset = fieldsetByLegend('Dashboard buttons change');
+    const optionLabels = [...fieldset.querySelectorAll('.option-label')].map((optionLabel) =>
+      optionLabel.textContent?.trim()
+    );
+    expect(optionLabels).toEqual(['Software volume', 'Hardware volume']);
+
+    const describedBy = fieldset.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    const hint = document.getElementById(describedBy ?? '');
+    expect(hint?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      "The dashboard rail's ⬆ and ⬇ buttons change the volume selected here."
+    );
+    // The old standalone hint pointed at the front-panel buttons from a paragraph
+    // that no longer means anything now that this control owns the explanation.
+    expect(pageText()).not.toContain('front-panel');
   });
 });
 

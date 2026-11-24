@@ -9,9 +9,19 @@
   import { settings } from './settings.svelte.js';
   import { stepVolume } from './volume.js';
   import Icon from './ui/Icon.svelte';
+  import { nextComponentId } from './ui/ids.js';
+
+  /** The rail's description target; see the sr-only sentence below. */
+  const stageId = nextComponentId('rail-stage');
 </script>
 
-<div class="rail" data-testid="control-rail" role="group" aria-label="Dashboard controls">
+<div
+  class="rail"
+  data-testid="control-rail"
+  role="group"
+  aria-label="Dashboard controls"
+  aria-describedby={settings.showControlRail ? stageId : undefined}
+>
   {#if settings.showControlRail}
     <button
       class="control"
@@ -28,8 +38,18 @@
     >
       <Icon name="mdi:volume-plus" size={24} />
     </button>
-    <span class="target-caption" data-testid="rail-volume-target">
-      {settings.railTarget === 'hardware' ? 'Hardware' : 'Software'}
+    <!--
+      The stage is announced, not printed. A pill naming the stage was clipped by
+      this column at every panel size (cd-qpg6), and the label belongs in
+      Settings -> Audio, which is where a person changes it; on the wall display
+      "Software" is a word at three metres that costs a pill's worth of rail. It
+      stays in the accessibility tree as the group's description, so a
+      screen-reader user still learns what the two buttons move before reaching
+      them. `.sr-only` clips, never hides (no display/visibility), so the text is
+      still in the a11y tree.
+    -->
+    <span class="sr-only" id={stageId} data-testid="rail-volume-stage">
+      The volume buttons change {settings.railTarget === 'hardware' ? 'hardware' : 'software'} volume.
     </span>
     <button
       class="control"
@@ -66,13 +86,19 @@
 
 <style>
   .rail {
+    /* One primary tap target plus one --gap-sm of inline padding either side:
+       56 + 2 * 8 = 72px at ui.scale 100%, and it keeps following --tap-primary
+       under ui.scale. A fixed column, not a shrink-to-fit: the rail is the
+       dashboard's right-hand edge (D28) and nothing in it is sized by its text
+       any more. */
+    --rail-column: calc(var(--tap-primary) + 2 * var(--gap-sm));
     display: flex;
     flex: none;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: var(--gap);
-    width: 72px;
+    width: var(--rail-column);
     max-height: 100%;
     padding: 0 var(--gap-sm);
     overflow: hidden;
@@ -99,25 +125,6 @@
     cursor: pointer;
   }
 
-  .target-caption {
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-    width: 72px;
-    min-height: 24px;
-    margin-inline: calc(-1 * var(--gap-sm));
-    padding: 0;
-    border: var(--border-width) solid var(--border);
-    border-radius: 999px;
-    background: var(--surface-hover);
-    color: var(--text);
-    font-size: var(--text-label);
-    font-weight: 600;
-    line-height: 1.1;
-    white-space: nowrap;
-  }
-
   .settings {
     display: grid;
     place-items: center;
@@ -134,6 +141,10 @@
   }
 
   .rail-error {
+    /* `overflow-wrap: anywhere` bounds the error's *min-content* width only, so a
+       long unbroken string would still be laid out at its intrinsic width; the
+       cap keeps it inside the column it lives in. */
+    max-width: var(--rail-column);
     max-height: 4.5em;
     margin: 0;
     overflow: hidden;

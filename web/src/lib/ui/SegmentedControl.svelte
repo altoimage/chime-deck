@@ -20,9 +20,16 @@
      * caller whose value is a narrowed union can respond without `bind:`.
      */
     change?: (value: string) => void;
+    /**
+     * The control's accessible description, rendered under the options and wired
+     * to the fieldset with `aria-describedby` (a loose `<p>` beside a fieldset is
+     * not associated with it, so a screen reader would read the group name and
+     * never the explanation).
+     */
+    hint?: string;
   }
 
-  let { label, options, value = $bindable(''), change: onchange }: Props = $props();
+  let { label, options, value = $bindable(''), change: onchange, hint }: Props = $props();
 
   // D26: segmented controls are for ≤4 options; more than that belongs in a
   // Select picker sheet. Logged once at init (deliberately the initial value
@@ -37,7 +44,12 @@
   }
   warnIfTooManyOptions();
 
-  const name = nextComponentId('segmented');
+  // One id per instance, like Input.svelte: the fieldset carries it, the hint
+  // derives from it, and the radios take their group `name` from it, so the
+  // describedby target cannot collide with another control's.
+  const id = nextComponentId('segmented');
+  const hintId = `${id}-hint`;
+  const name = `${id}-options`;
 
   // The last value this control either carried or reported, so `change` fires
   // once per real selection and never for a re-tap of the already-chosen
@@ -64,7 +76,7 @@
   }
 </script>
 
-<fieldset class="segmented">
+<fieldset class="segmented" id={id} aria-describedby={hint ? hintId : undefined}>
   <legend class="field-label">{label}</legend>
   <div class="options">
     {#each options as option (option.value)}
@@ -91,6 +103,9 @@
       </label>
     {/each}
   </div>
+  {#if hint}
+    <p class="hint" id={hintId}>{hint}</p>
+  {/if}
 </fieldset>
 
 <style>
@@ -160,5 +175,13 @@
   .option:has(:focus-visible) {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: var(--focus-ring-offset);
+  }
+
+  .hint {
+    margin: var(--gap-sm) 0 0;
+    color: var(--text-muted);
+    font-size: var(--text-body);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
   }
 </style>

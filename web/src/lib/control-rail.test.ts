@@ -140,7 +140,22 @@ describe('control rail structure', () => {
       'Mute',
       'Settings'
     ]);
-    expect(mustFind('[data-testid="rail-volume-target"]').textContent?.trim()).toBe('Software');
+    // cd-qpg6: the stage used to be a visible pill in this rail, clipped by the
+    // 72px column at every panel size. It now lives in Settings -> Audio
+    // ("Dashboard buttons change"); the rail keeps it only in the accessibility
+    // tree, as the group's description. `.sr-only` is a clip, not a hide, so the
+    // sentence is still announced.
+    const stage = mustFind<HTMLElement>('[data-testid="rail-volume-stage"]');
+    expect(stage.className).toContain('sr-only');
+    expect(stage.id).not.toBe('');
+    expect(stage.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'The volume buttons change software volume.'
+    );
+    expect(rail.getAttribute('aria-describedby')).toBe(stage.id);
+    // And no visible text is left: with the sr-only sentence taken out, the rail
+    // reads as empty. This is the assertion that fails if a caption pill is ever
+    // put back on the wall display.
+    expect((rail.textContent ?? '').replace(stage.textContent ?? '', '').trim()).toBe('');
     for (const button of controls.slice(0, 3)) {
       expect(button.getAttribute('type')).toBe('button');
     }
@@ -155,6 +170,10 @@ describe('control rail structure', () => {
       'rail-mute',
       'rail-settings'
     ]);
+    // Nothing to describe: the volume buttons are not rendered, so the rail must
+    // not reference a sentence about them.
+    expect(rail.hasAttribute('aria-describedby')).toBe(false);
+    expect(rail.querySelector('[data-testid="rail-volume-stage"]')).toBeNull();
   });
 });
 
@@ -180,10 +199,12 @@ describe('volume taps', () => {
     });
   });
 
-  it('uses one software key per PATCH and the target caption names that key', async () => {
+  it('uses one software key per PATCH, and the button names that key', async () => {
     await loadWith({ 'audio.rail_target': 'software' });
     render();
 
+    // The rail's aria-label is now the only in-rail cue for which stage a tap
+    // moves, so it has to name the key the PATCH writes.
     const up = mustFind<HTMLButtonElement>('[data-testid="rail-volume-up"]');
     expect(up.getAttribute('aria-label')).toBe('Turn software volume up');
     up.click();
@@ -197,7 +218,14 @@ describe('volume taps', () => {
     await loadWith({ 'audio.hardware_volume': 40, 'audio.rail_target': 'hardware' });
     render();
 
-    expect(mustFind('[data-testid="rail-volume-target"]').textContent?.trim()).toBe('Hardware');
+    const stage = mustFind<HTMLElement>('[data-testid="rail-volume-stage"]');
+    expect(stage.className).toContain('sr-only');
+    expect(stage.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'The volume buttons change hardware volume.'
+    );
+    expect(mustFind('[data-testid="control-rail"]').getAttribute('aria-describedby')).toBe(stage.id);
+    const rail = mustFind('[data-testid="control-rail"]');
+    expect((rail.textContent ?? '').replace(stage.textContent ?? '', '').trim()).toBe('');
     const up = mustFind<HTMLButtonElement>('[data-testid="rail-volume-up"]');
     expect(up.getAttribute('aria-label')).toBe('Turn hardware volume up');
     up.click();

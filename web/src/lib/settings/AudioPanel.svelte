@@ -47,8 +47,8 @@
 
   const backendOptions = [{ value: 'mpv', label: 'mpv (libmpv)' }];
   const railTargetOptions = [
-    { value: 'software', label: 'Software' },
-    { value: 'hardware', label: 'Hardware' }
+    { value: 'software', label: 'Software volume' },
+    { value: 'hardware', label: 'Hardware volume' }
   ];
 
   let backend = $state(DEFAULT_BACKEND);
@@ -609,13 +609,20 @@
         {/if}
       </div>
 
+      <!--
+        cd-qpg6: the dashboard rail prints no caption any more (the owner: the
+        text "should be in the config somewhere if anywhere"), so this control is
+        the only explanation of what the rail's two volume buttons move. The
+        legend names the buttons, the options name the stage, and the hint -- the
+        fieldset's aria-describedby -- says the buttons act on the selection here.
+      -->
       <SegmentedControl
-        label="Rail volume buttons"
+        label="Dashboard buttons change"
         options={railTargetOptions}
         value={railTarget}
         change={updateRailTarget}
+        hint="The dashboard rail's ⬆ and ⬇ buttons change the volume selected here."
       />
-      <p class="hint rail-hint">The front-panel ⬆/⬇ buttons change this one.</p>
 
       <Input
         label="Hardware control (advanced)"
