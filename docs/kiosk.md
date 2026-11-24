@@ -117,9 +117,18 @@ Precedence is CLI > environment > default.
 | Environment | `KIOSK_URL=http://bigpc.local:8080/?kiosk=1` |
 | Default | `http://127.0.0.1:8080/?kiosk=1` (backend on this machine) |
 
-`?kiosk=1` is the UI contract: it hides the chrome and cursor and stops the page
-scrolling. `?kiosk=0` is the escape hatch for debugging with the controls
-visible. A split deployment points the panel at the server:
+`?kiosk=1` is the UI contract, and it changes three things — worth knowing, because a panel looks
+slightly different from a browser at the same URL:
+
+| What | In kiosk mode |
+| --- | --- |
+| the `ChimeDeck` title in the header | **hidden** — a wall display does not need to name itself |
+| the header's settings button | **hidden** — the control rail's gear is the way in |
+| the mouse cursor | **hidden** after five seconds idle, reappearing on movement |
+
+Nothing else changes: the tiles, the status pills, the clock and the control rail are all present,
+and the page does not scroll. `?kiosk=0` is the escape hatch for debugging with the title and
+header button visible. A split deployment points the panel at the server:
 
 ```
 http://bigpc.local:8080/?kiosk=1
