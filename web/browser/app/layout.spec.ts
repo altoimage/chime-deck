@@ -3,6 +3,7 @@ import {
   SEED,
   resetBackend,
   setTileCount,
+  visibleTextsUnder,
   watchOffOriginRequests,
   type OffOriginWatch
 } from './fixtures.js';
@@ -642,12 +643,14 @@ async function measureRendered(page: Page): Promise<RenderedGeometry> {
 }
 
 /**
- * The control rail's own box, its overflow metrics and the text it paints.
+ * The control rail's own box and its overflow metrics.
  *
- * `visibleTexts` is a list rather than a boolean so a failure names the text that
- * should not be there. Both scroll metrics are collected because the rail is a
- * fixed column: it can overflow vertically (too many controls for the panel) as
- * easily as horizontally, and only one of those would show up in a screenshot.
+ * The painted text is read by the shared `visibleTextsUnder` helper in
+ * `fixtures.ts`, which lists it rather than reporting a boolean so a failure
+ * names the text that should not be there. Both scroll metrics are collected
+ * because the rail is a fixed column: it can overflow vertically (too many
+ * controls for the panel) as easily as horizontally, and only one of those would
+ * show up in a screenshot.
  */
 interface RailGeometry {
   /** The rail's **border box**: the fixed column itself. */
@@ -656,8 +659,6 @@ interface RailGeometry {
   readonly scrollHeight: number;
   readonly clientWidth: number;
   readonly clientHeight: number;
-  /** Every direct non-whitespace text node in the subtree, outside `.sr-only`. */
-  readonly visibleTexts: ReadonlyArray<{ readonly tag: string; readonly text: string }>;
   /** The clipped stage sentence, whitespace-collapsed. */
   readonly stageText: string;
 }
@@ -2407,31 +2408,6 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
           throw new Error('the dashboard has no control rail to measure');
         }
 
-        /*
-         * Text that is *visible* on the wall display: a direct child text node
-         * with something in it, unless the node sits inside the `.sr-only` clip.
-         * `sr-only` is a 1px clip, not `display: none`, so the sentence still
-         * contributes to `textContent` and is still announced -- what it never
-         * does is paint. A caption pill re-added to the rail shows up here as a
-         * non-empty entry, which is the point of collecting the list rather than
-         * asserting `textContent` is empty.
-         */
-        const visibleTexts: Array<{ tag: string; text: string }> = [];
-        for (const element of [root, ...root.querySelectorAll('*')]) {
-          if (element.closest('.sr-only') !== null) {
-            continue;
-          }
-          const directText = [...element.childNodes]
-            .filter((node) => node.nodeType === Node.TEXT_NODE)
-            .map((node) => node.textContent ?? '')
-            .join('')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (directText !== '') {
-            visibleTexts.push({ tag: element.tagName.toLowerCase(), text: directText });
-          }
-        }
-
         const stageNode = root.querySelector('[data-testid="rail-volume-stage"]');
 
         return {
@@ -2440,16 +2416,26 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
           scrollHeight: root.scrollHeight,
           clientWidth: root.clientWidth,
           clientHeight: root.clientHeight,
-          visibleTexts,
           stageText: (stageNode?.textContent ?? '').replace(/\s+/g, ' ').trim()
         };
       });
+
+      /*
+       * Text that is *visible* on the wall display: a direct child text node with
+       * something in it, unless the node sits inside the `.sr-only` clip. `sr-only`
+       * is a 1px clip, not `display: none`, so the sentence still contributes to
+       * `textContent` and is still announced -- what it never does is paint. A
+       * caption pill re-added to the rail shows up here as a non-empty entry,
+       * which is the point of collecting the list rather than asserting
+       * `textContent` is empty.
+       */
+      const visibleTexts = await page.evaluate(visibleTextsUnder, '[data-testid="control-rail"]');
 
       const detail =
         `${target} rail at ${width}x${height}: rail ${JSON.stringify(measured.rail)}, ` +
         `scroll ${measured.scrollWidth}x${measured.scrollHeight}, ` +
         `client ${measured.clientWidth}x${measured.clientHeight}, ` +
-        `visible text ${JSON.stringify(measured.visibleTexts)}, ` +
+        `visible text ${JSON.stringify(visibleTexts)}, ` +
         `stage ${JSON.stringify(measured.stageText)}`;
 
       // Logged before the assertions, so the numbers are in the report even when
@@ -2458,7 +2444,7 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
         `rail ${target} at ${width}x${height}: column ` +
           `${measured.rail.width.toFixed(2)}x${measured.rail.height.toFixed(2)}, ` +
           `scroll ${measured.scrollWidth} -> client ${measured.clientWidth}, ` +
-          `visible text nodes ${measured.visibleTexts.length}`
+          `visible text nodes ${visibleTexts.length}`
       );
 
       // The column the removed pill used to widen: a fixed 72px, not a
@@ -2474,7 +2460,7 @@ test('the control rail is four 56px controls in a 72px column with no text to cl
       // Clause 3: the rail paints no text at all. This is the assertion that
       // fails if a caption pill is ever put back on the wall display, and it is
       // what fails on the pre-change bundle, where the pill reads `Software`.
-      expect(measured.visibleTexts, detail).toEqual([]);
+      expect(visibleTexts, detail).toEqual([]);
 
       // The four controls, in order, unchanged. Their order is the rail's
       // contract: ⬆, ⬇, mute, then the gear that navigates away.

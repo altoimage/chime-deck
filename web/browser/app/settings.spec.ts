@@ -5,6 +5,7 @@ import {
   readEntities,
   readSettings,
   resetBackend,
+  visibleTextsUnder,
   watchOffOriginRequests,
   type OffOriginWatch,
   type SettingsBodyShape
@@ -151,6 +152,88 @@ test('the Hardware volume stepper saves through the real settings PATCH', async 
     .toBe(41);
   await expect(hardwareVolume).toContainText('41');
   await expect(saveButton(page)).toBeDisabled();
+
+  watch.assertAllLocal();
+});
+
+/**
+ * cd-slte: the duplicated volume label.
+ *
+ * Each output-volume row draws a Slider's `<label>` and a Stepper's own span
+ * with the same text, so the row printed its label twice. The Stepper's span now
+ * opts into `.sr-only`, which keeps it as the group's `aria-labelledby` target
+ * while painting nothing. DOM facts only and no interaction: the bench's
+ * hardware controls are disabled, and a disabled button must not make this
+ * flaky.
+ */
+test('each volume row prints its label once and both controls keep their names', async ({
+  page
+}) => {
+  await page.goto('/settings/audio');
+  await expect(page.getByRole('slider', { name: 'Software volume' })).toHaveCount(1);
+
+  // `toBeVisible()` would pass for the clipped span too, so the painted text is
+  // read from the page's own text nodes instead.
+  const painted = await page.evaluate(visibleTextsUnder, '.volume-field');
+  expect(
+    painted.filter((node) => node.text === 'Software volume'),
+    JSON.stringify(painted)
+  ).toHaveLength(1);
+  expect(
+    painted.filter((node) => node.text === 'Hardware volume'),
+    JSON.stringify(painted)
+  ).toHaveLength(1);
+
+  const labels = ['Software volume', 'Hardware volume'];
+  for (const [index, label] of labels.entries()) {
+    const row = page.locator('.volume-field').nth(index);
+
+    // One painted label (the Slider's) and one clipped label (the Stepper's).
+    await expect(row.locator('.field-label:not(.sr-only)')).toHaveCount(1);
+    await expect(row.locator('.field-label.sr-only')).toHaveCount(1);
+
+    // Both controls still answer to the label: the slider by its `<label for>`,
+    // the whole −/+ group by `aria-labelledby` → the clipped span.
+    await expect(page.getByRole('slider', { name: label })).toHaveCount(1);
+    await expect(page.getByRole('slider', { name: label })).toHaveAccessibleName(label);
+    await expect(page.getByRole('group', { name: label })).toHaveCount(1);
+    await expect(page.getByRole('group', { name: label })).toHaveAccessibleName(label);
+
+    const labelledBy = await row.locator('[role="group"]').getAttribute('aria-labelledby');
+    const nameNode = page.locator(`[id="${labelledBy ?? ''}"]`);
+    await expect(nameNode).toHaveCount(1);
+    await expect(nameNode).toHaveClass(/\bsr-only\b/);
+    await expect(nameNode).toHaveText(label);
+  }
+
+  // The clip must come from the shared stylesheet (`global.css`), not from
+  // `display: none` — which would drop the group's name from the a11y tree.
+  const clips = await page
+    .locator('.volume-field .field-label.sr-only')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const style = getComputedStyle(node);
+        return {
+          position: style.position,
+          width: style.width,
+          height: style.height,
+          display: style.display,
+          visibility: style.visibility,
+          clip: style.clip
+        };
+      })
+    );
+  expect(clips).toHaveLength(2);
+  for (const clip of clips) {
+    expect(clip.position).toBe('absolute');
+    expect(clip.width).toBe('1px');
+    expect(clip.height).toBe('1px');
+    expect(clip.display).not.toBe('none');
+    expect(clip.visibility).toBe('visible');
+    // The exact `rect(...)` spelling is the stylesheet's business; only "clipped"
+    // matters here.
+    expect(clip.clip).not.toBe('auto');
+  }
 
   watch.assertAllLocal();
 });

@@ -336,6 +336,59 @@ export async function readLatestPress(
   return body.rows[0] ?? null;
 }
 
+/** One element's own painted text, as `visibleTextsUnder` reports it. */
+export interface VisibleTextNode {
+  readonly tag: string;
+  readonly text: string;
+}
+
+/**
+ * The text a screen actually paints inside every match of `rootSelector`.
+ *
+ * Deliberately not `toBeVisible()`: a `.sr-only` label is `position: absolute`
+ * at 1×1 with no `visibility: hidden`, so Playwright reports it as visible even
+ * though the screen paints none of it. Walking text nodes and skipping anything
+ * matching `.closest('.sr-only')` is the only honest way to ask "how many times
+ * does this label reach the eye?".
+ *
+ * Called as `page.evaluate(visibleTextsUnder, selector)`, so Playwright
+ * serialises this function's source and runs it inside the page: it must close
+ * over nothing — no imports, no module constants, no outer variables — or the
+ * page would see an undefined identifier. (Precedent for a non-fixture export
+ * here is `pngSize`.)
+ *
+ * @param rootSelector a CSS selector matching one or more roots.
+ * @returns `{ tag, text }` per element that directly paints non-empty text,
+ *          its child text nodes whitespace-collapsed and trimmed.
+ */
+export function visibleTextsUnder(rootSelector: string): VisibleTextNode[] {
+  const roots = [...document.querySelectorAll(rootSelector)];
+  if (roots.length === 0) {
+    throw new Error(`visibleTextsUnder: no element matches "${rootSelector}"`);
+  }
+
+  const nodes: VisibleTextNode[] = [];
+  for (const root of roots) {
+    for (const element of [root, ...root.querySelectorAll('*')]) {
+      if (element.closest('.sr-only') !== null) {
+        continue;
+      }
+      const text = [...element.childNodes]
+        // 3 is `Node.TEXT_NODE`; the numeric literal keeps the function free of
+        // any identifier the page might not define.
+        .filter((child) => child.nodeType === 3)
+        .map((child) => child.textContent ?? '')
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text !== '') {
+        nodes.push({ tag: element.tagName.toLowerCase(), text });
+      }
+    }
+  }
+  return nodes;
+}
+
 /** The eight bytes every PNG starts with. */
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 

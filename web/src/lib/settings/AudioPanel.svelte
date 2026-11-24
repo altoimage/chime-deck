@@ -532,8 +532,13 @@
           <div class="slider-commit" onchange={() => updateVolume(volume)}>
             <Slider label="Software volume" bind:value={volume} min={0} max={100} step={1} unit="%" />
           </div>
+          <!--
+            cd-slte: the Slider above already prints this label, so the Stepper's
+            span is clipped to an accessible name for its −/+ group only.
+          -->
           <Stepper
             label="Software volume"
+            labelHidden
             bind:value={volume}
             min={0}
             max={100}
@@ -568,6 +573,7 @@
           </div>
           <Stepper
             label="Hardware volume"
+            labelHidden
             bind:value={hardwareVolume}
             min={0}
             max={100}

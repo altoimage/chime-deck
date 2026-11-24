@@ -409,6 +409,65 @@ describe('two-stage output volume', () => {
     });
   });
 
+  it('prints each volume label once and keeps both controls named', async () => {
+    await loadAndRender({
+      settings: { 'audio.volume': 60, 'audio.hardware_volume': 40 }
+    });
+
+    // Only the two output-volume rows carry `.volume-field`; the quiet-hours
+    // volume row is a plain `.field`.
+    const rows = [...document.querySelectorAll<HTMLElement>('.volume-field')];
+    expect(rows).toHaveLength(2);
+
+    const labels = ['Software volume', 'Hardware volume'];
+    rows.forEach((row, index) => {
+      const label = labels[index];
+
+      // b. Exactly one *painted* label per row: the Slider's `<label>`. The
+      // Stepper's own span is clipped, not deleted, so `.sr-only` is excluded.
+      const painted = [...row.querySelectorAll<HTMLElement>('.field-label')].filter(
+        (element) => !element.classList.contains('sr-only')
+      );
+      expect(painted).toHaveLength(1);
+      expect(painted[0].textContent?.trim()).toBe(label);
+
+      // c. The Slider's accessible name is untouched: its `<label for>` still
+      // points at the range input's id.
+      const input = row.querySelector<HTMLInputElement>('input[type="range"]');
+      expect(input).not.toBeNull();
+      expect(painted[0].getAttribute('for')).toBe(input?.id);
+
+      // d. The Stepper's group is still named by its own span — now clipped, so
+      // the name comes from the same node as before, just invisibly.
+      const group = row.querySelector<HTMLElement>('[role="group"]');
+      expect(group).not.toBeNull();
+      const labelledBy = group?.getAttribute('aria-labelledby') ?? '';
+      const named = document.getElementById(labelledBy);
+      expect(named).not.toBeNull();
+      expect(named?.textContent?.trim()).toBe(label);
+      expect(named?.classList.contains('field-label')).toBe(true);
+      expect(named?.classList.contains('sr-only')).toBe(true);
+      expect(named?.id).toBe(labelledBy);
+    });
+
+    // e. Opt-in, panel-wide: exactly the two volume groups hide their label.
+    const hiddenNames = [...document.querySelectorAll<HTMLElement>('[role="group"]')].filter(
+      (group) =>
+        document
+          .getElementById(group.getAttribute('aria-labelledby') ?? '')
+          ?.classList.contains('sr-only') ?? false
+    );
+    expect(hiddenNames).toHaveLength(2);
+
+    // f. The quiet-hours volume Stepper still paints its label: nothing hides
+    // the span globally.
+    const quietGroup = buttonByAriaLabel('Increase Quiet hours volume').closest('[role="group"]');
+    expect(quietGroup).not.toBeNull();
+    const quietLabel = document.getElementById(quietGroup?.getAttribute('aria-labelledby') ?? '');
+    expect(quietLabel?.textContent?.trim()).toBe('Quiet hours volume');
+    expect(quietLabel?.classList.contains('sr-only')).toBe(false);
+  });
+
   it('disables hardware controls and shows the unavailable reason verbatim', async () => {
     const reason = 'no hardware volume control on this output';
     const backend = await loadAndRender({

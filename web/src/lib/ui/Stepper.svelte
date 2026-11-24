@@ -11,6 +11,19 @@
     unit?: string;
     disabled?: boolean;
     /**
+     * Paint the label visually clipped (`.sr-only`) while keeping it in the DOM as
+     * the group's `aria-labelledby` target.
+     *
+     * For rows where another control already prints the same label: Settings →
+     * Audio's two volume rows pass one label to both a Slider and this Stepper, so
+     * the row read it twice. The clip is the shared `global.css` rule — a 1px box,
+     * never `display: none` — so the text still names the `role="group"` row and
+     * is still announced. Opt-in: left unset, the label stays visible, which is
+     * the only label a Stepper has in VolumeSheet, ButtonEditor, SpeechPanel and
+     * the Gallery.
+     */
+    labelHidden?: boolean;
+    /**
      * Called after an internal −/+ change has updated `value` (the new value).
      * Optional: existing callers keep the old behaviour (mutate only), while a
      * sheet can commit one save per tap instead of PATCHing per movement.
@@ -26,6 +39,7 @@
     step = 1,
     unit = '',
     disabled = false,
+    labelHidden = false,
     change: onchange
   }: Props = $props();
 
@@ -41,7 +55,7 @@
 </script>
 
 <div class="field">
-  <span class="field-label" id={labelId}>{label}</span>
+  <span class="field-label" class:sr-only={labelHidden} id={labelId}>{label}</span>
   <!-- D26: no <input type="number"> — large −/+ buttons instead. -->
   <div class="row" role="group" aria-labelledby={labelId}>
     <IconButton
