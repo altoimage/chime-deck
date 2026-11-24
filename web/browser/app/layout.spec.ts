@@ -202,8 +202,11 @@ interface TileInternals {
  *
  * `content` is `.content`'s `getBoundingClientRect()` inset by its own computed
  * padding: `.content`'s padding is space the tiles may not use anyway, so
- * counting it would report a padding-only "empty region" and make the coverage
- * ratio depend on a `clamp()` rather than on the grid.
+ * counting it would report a padding-only "empty region". That padding is a
+ * single `--gap` on the start edge and none on the end edge (the rail owns
+ * that side), so the inset is the same 16px gutter the panel shows everywhere
+ * rather than a viewport `clamp()` the coverage ratio would track instead of
+ * the grid.
  *
  * `contentBorder` is that same rect **un-inset**. Both exist because they answer
  * two different questions, and neither can stand in for the other: HSD-enxf's
@@ -331,13 +334,15 @@ function borderCoverageOf(geometry: FillGeometry): {
  * **both axes** — the ticket's own criterion, and the one that names the defect.
  *
  * Two axes and not the area, deliberately. The area ratio is smaller by
- * construction, because `.content`'s padding is inside its border box and
- * outside the tiles' reach: at 1280×720 the tiles cover 92.1% of the width and
- * 94.7% of the height, an area share of 87.2%. Asserting the area would
- * therefore not be a stricter version of the same test — it would be a test of
- * the padding `clamp()`, and it would push a later ticket to shrink the
- * deliberate panel inset just to move a number. The axis shares are what the
- * owner's complaint was about: an empty band down each side, and one at the top.
+ * construction, because `.content`'s own padding and the rail's column are
+ * inside its border box and outside the tiles' reach: at 1280×720 the tiles
+ * cover 98.6% of the width and 95.0% of the height, an area share of 93.7%.
+ * Asserting the area would therefore not be a stricter version of the same
+ * test — it would be a test of the panel inset, and since cd-bdjz that inset is
+ * one `--gap` plus the derived rail column, so a later ticket that "improved"
+ * the area share would be shrinking a 16px gutter, not filling the panel. The
+ * axis shares are what the owner's complaint was about: an empty band down each
+ * side, and one at the top.
  *
  * @param geometry the measured fill geometry.
  * @param detail the failure message, carrying the whole measurement.
@@ -550,8 +555,8 @@ interface RenderedGeometry {
    * The rail's own **border box**: the fixed column (D28) those controls sit in.
    *
    * This is what the file used to spend on a caption pill's *width*, and its
-   * width is now the size assertion itself: 96 layout px at 100% and at 130%
-   * (80 of `--rail-control` plus two 8px gutters, cd-bdjz), i.e. 124.8
+   * width is now the size assertion itself: 112 layout px at 100% and at 130%
+   * (80 of `--rail-control` plus two 16px `--gap` gutters, cd-bdjz), i.e. 145.6
    * **rendered** px at 130%, because the column is a token sum rather than a
    * viewport share.
    */
@@ -833,10 +838,15 @@ function reachableShareOf(geometry: FillGeometry): {
  * this reaches 100% at every step, because the grid fills the box it is given
  * and `ui.scale` only changes how much box the panel inset leaves (see the
  * recorded border-box shares by the scale matrix below). The **border** box is a
- * different, stricter question — HSD-enxf's, answered by `borderCoverageOf` — and
- * it is never substituted for this one: past 130% the px inset alone costs the
- * tiles ~10-12% of the border box's width, so asserting the border box here would
- * measure the padding `clamp()`, not the fill.
+ * different, stricter question — HSD-enxf's, answered by `borderCoverageOf` —
+ * but it is no longer a test of the padding either: since cd-bdjz the px inset
+ * is one `--gap` plus the derived rail column, 128 layout px, which costs at
+ * most 2.2% of the border box's width (measured 98.8% at 85% through 97.8% at
+ * 150% on a 1280x720 panel), so the caller's `reachable` guard in
+ * `expectDashboardInsidePanel` now takes HSD-enxf's 90% line at every step of
+ * the scale matrix, not only at the small ones. The content box is still the
+ * box asserted here unconditionally, and the border box is still never
+ * substituted for it.
  *
  * @param geometry the measured, zoom-corrected fill geometry.
  * @param detail the failure message, carrying the measurement.
@@ -1512,15 +1522,22 @@ test('ui.scale keeps the dashboard inside the panel at every step', async ({ pag
   test.setTimeout(120_000);
 
   // What AC 5 asserts is the **content box**, and `expectPanelCoverage` asserts
-  // it literally at every step. The **border**-box share is recorded here and
-  // printed, never asserted: the panel inset is px chrome
-  // (`padding: clamp(12px, 2.4vh, 48px) clamp(16px, 4vw, 48px)`), so `ui.scale`
-  // moves it by the one factor while the panel keeps its rendered size and the
-  // tiles can reach at most 93.3 / 92.1 / 90.8 / 89.5 / 87.7 % of the border
-  // box's width at 85 / 100 / 115 / 130 / 150 % on a 1280x720 panel (81.6 / 96 /
-  // 110.4 / 124.8 / 144 px of total horizontal inset). A 90% line on the border
-  // box would be a demand to shrink the deliberate inset, not a fill property —
-  // and the figure is printed so it cannot be read as AC 5 being met.
+  // it literally at every step (100% at every cell, since the grid fills the
+  // box it is handed). The **border**-box share is recorded and printed as
+  // well, and since cd-bdjz it is also asserted: the inset is one `--gap` plus
+  // the derived 112px rail column — 128 layout px — not a viewport clamp, so
+  // `ui.scale` moves it by the one factor while the panel keeps its rendered
+  // size, and the tiles reach 98.8 / 98.6 / 98.4 / 98.2 / 97.8 % of the border
+  // box's width at 85 / 100 / 115 / 130 / 150 % on a 1280x720 panel (108.8 /
+  // 128 / 147.2 / 166.4 / 192 px of total horizontal inset), which clears
+  // HSD-enxf's 90% line at every step through `expectDashboardInsidePanel`'s
+  // reachable-share guard.
+  //
+  // The height share is the axis that actually varies — 95.8 / 95.0 / 94.1 /
+  // 92.5 / 90.9 % at the same five steps — because the header wraps to a second
+  // row at 130% and the 16px block padding is px chrome like everything else,
+  // and 90.9% at 150% is the tightest cell on the matrix. The figures are
+  // printed so a reader can see them without a re-run.
 
   for (const step of SCALE_STEPS) {
     for (const viewport of SCALE_VIEWPORTS) {
@@ -1956,8 +1973,8 @@ test('ui.scale multiplies the interface once, not twice, and D30 stays scale-inv
 
     // The column and the control inside it moved by the same factor: if only one
     // had moved twice, or if the column had kept a px width laid out inside the
-    // zoomed space, this ratio would move. 96/80 — one rail control plus two small
-    // gaps against that control — must stay put at every step.
+    // zoomed space, this ratio would move. 112/80 — one rail control plus two
+    // 16px gutters against that control — must stay put at every step.
     const railOfButton = {
       base: base.rail.width / base.railButton.height,
       scaled: scaled.rail.width / scaled.railButton.height
@@ -2339,14 +2356,15 @@ test('ui.scale scales sheets and the settings screens', async ({ page, request }
 });
 
 /**
- * The control rail: four 80px controls in a fixed 96px column (D28), with no
+ * The control rail: four 80px controls in a fixed 112px column (D28), with no
  * visible text left to clip and the volume stage in the accessibility tree
  * instead of on the wall display.
  *
  * cd-bdjz widened it from 56/72 to 80/96 because the owner read the column as
- * wasted horizontal space. The vertical gap between the separate targets is
- * deliberately unchanged at 16px -- four separate targets, not one segmented
- * strip.
+ * wasted horizontal space, then re-spent the column's own gutters on `--gap`
+ * (16px either side of the control, 80/112) so the rail's seams match the
+ * grid's. The vertical gap between the separate targets is deliberately
+ * unchanged at 16px -- four separate targets, not one segmented strip.
  *
  * cd-qpg6 shipped twice. The first pass sized the caption pill to its word and
  * let the column grow with it -- an elaborate proof that a word can be made to
@@ -2358,7 +2376,7 @@ test('ui.scale scales sheets and the settings screens', async ({ page, request }
  * a visible text node in the rail failing clause 3 -- as well as the box the
  * removed pill used to widen.
  */
-test('the control rail is four 80px controls in a 96px column with no text to clip', async ({
+test('the control rail is four 80px controls in a 112px column with no text to clip', async ({
   page,
   request
 }) => {
@@ -2367,8 +2385,8 @@ test('the control rail is four 80px controls in a 96px column with no text to cl
   // headroom for the tier's own 300s global budget.
   test.setTimeout(150_000);
 
-  /** `--rail-column`: `--rail-control` (80) plus one `--gap-sm` either side (8). */
-  const RAIL_COLUMN_WIDTH = 96;
+  /** `--rail-column`: `--rail-control` (80) plus one `--gap` (16) either side. */
+  const RAIL_COLUMN_WIDTH = 112;
   /**
    * `--rail-control`: the square each control is painted at. It was
    * `--tap-primary` (56) before cd-bdjz.
@@ -2376,8 +2394,8 @@ test('the control rail is four 80px controls in a 96px column with no text to cl
   const CONTROL_SIZE = 80;
   /**
    * Sub-pixel tolerance. `getBoundingClientRect()` returns fractions of a layout
-   * px, and the rail is a `calc()` of two tokens, so the honest number is "96 to
-   * within rounding" rather than exactly 96.0.
+   * px, and the rail is a `calc()` of two tokens, so the honest number is "112 to
+   * within rounding" rather than exactly 112.0.
    */
   const TOLERANCE = 0.5;
 
@@ -2458,7 +2476,7 @@ test('the control rail is four 80px controls in a 96px column with no text to cl
           `visible text nodes ${visibleTexts.length}`
       );
 
-      // The column the removed pill used to widen: a fixed 96px, not a
+      // The column the removed pill used to widen: a fixed 112px, not a
       // viewport share and not a shrink-to-fit around a word.
       expect(measured.rail.width, detail).toBeGreaterThanOrEqual(RAIL_COLUMN_WIDTH - TOLERANCE);
       expect(measured.rail.width, detail).toBeLessThanOrEqual(RAIL_COLUMN_WIDTH + TOLERANCE);
@@ -2606,8 +2624,9 @@ interface GlyphMetrics {
 }
 
 /**
- * The wider rail (cd-bdjz): 80px controls in a 96px column, with the tiles still
- * covering the panel the D30 contract asks for.
+ * The wider rail (cd-bdjz): 80px controls in a 112px column, with the tiles still
+ * covering the panel the D30 contract asks for, and every horizontal seam on the
+ * dashboard measuring the same 16px `--gap`.
  *
  * Two questions at once, on purpose. Widening the column spends tile area, and
  * the acceptance criterion is that the grid keeps filling the panel — so the
@@ -2616,8 +2635,15 @@ interface GlyphMetrics {
  * failure this test has to rule out is a rail that grows by merging four targets
  * into a single strip, which would satisfy a width assertion and lose four tap
  * targets, so the gaps and the parent structure are asserted too.
+ *
+ * The 16px gutters are asserted by measurement in the same test, on all five
+ * seams the panel shows: the edge to the first tile, tile to tile inside the
+ * first row, the grid's right edge to the control's left edge, the control's
+ * right edge to the screen edge, and the title's left edge against the first
+ * tile's. A panel that centred the grid, or one that paid for the wider rail out
+ * of one side, moves at least one of them.
  */
-test('the wider rail keeps the tiles filling the panel and its own controls whole', async ({
+test('every horizontal gutter on the dashboard is 16px, and the wider rail keeps the tiles filling the panel', async ({
   page,
   request
 }) => {
@@ -2636,8 +2662,8 @@ test('the wider rail keeps the tiles filling the panel and its own controls whol
     { width: 720, height: 1280 } // portrait: the rail is not a landscape-only rule
   ] as const;
 
-  /** `--rail-column`: `--rail-control` (80) plus one `--gap-sm` either side (8). */
-  const RAIL_COLUMN_WIDTH = 96;
+  /** `--rail-column`: `--rail-control` (80) plus one `--gap` (16) either side. */
+  const RAIL_COLUMN_WIDTH = 112;
   /** `--rail-control`: the square each control is painted at. It was 56 before. */
   const CONTROL_SIZE = 80;
   /**
@@ -2652,6 +2678,16 @@ test('the wider rail keeps the tiles filling the panel and its own controls whol
    * targets touch.
    */
   const MIN_GAP = 12;
+  /** The owner's gutter: `--gap`, the one inset the panel spends on every seam. */
+  const GUTTER = 16;
+  /**
+   * Tolerance for a `--gap` measured on screen. `getBoundingClientRect()` returns
+   * fractions of a layout px, and the grid's last track absorbs the division
+   * remainder (a 1280px panel's columns come back 373.328125 / 373.34375), so a
+   * gutter can land a fraction off 16. ±1px is the honest bound: a real 15px or
+   * 17px gutter still fails, while a wider bound would stop proving 16 at all.
+   */
+  const GUTTER_TOLERANCE = 1;
 
   const rail = page.locator('[data-testid="control-rail"]');
   const stage = page.locator('[data-testid="rail-volume-stage"]');
@@ -2730,6 +2766,28 @@ test('the wider rail keeps the tiles filling the panel and its own controls whol
       (glyph.bboxWidth / glyph.viewBoxWidth) * (glyph.svgWidth / glyph.controlWidth);
     const border = borderCoverageOf(geometry);
 
+    // The panel's horizontal seams, measured rather than read off the stylesheet.
+    // The viewport starts at 0, so the first tile's `left` *is* the edge gutter.
+    const title = await renderedBoxOf(page.locator('.product'));
+    const leftmost = [...geometry.tiles].sort((a, b) => a.left - b.left)[0];
+    const lowestTop = Math.min(...geometry.tiles.map((tile) => tile.top));
+    const firstRow = [...geometry.tiles]
+      .filter((tile) => tile.top === lowestTop)
+      .sort((a, b) => a.left - b.left);
+    const edgeToTile = leftmost.left;
+    const betweenTiles = firstRow
+      .slice(1)
+      .map((tile, index) => tile.left - firstRow[index].right);
+    const rightmostTile = Math.max(...geometry.tiles.map((tile) => tile.right));
+    const gridToControl = frame.controls[0].left - rightmostTile;
+    const controlToEdge = frame.innerWidth - frame.controls[0].right;
+    const titleToTile = Math.abs(title.left - leftmost.left);
+    const gutterDetail =
+      `${detail}; edge→tile ${edgeToTile.toFixed(2)}, ` +
+      `tile→tile ${betweenTiles.map((gap) => gap.toFixed(2)).join('/')}, ` +
+      `grid→control ${gridToControl.toFixed(2)}, control→edge ${controlToEdge.toFixed(2)}, ` +
+      `title→tile ${titleToTile.toFixed(2)}`;
+
     // Logged before the assertions, so the numbers are in the report even when
     // one of them fires.
     console.log(
@@ -2738,7 +2796,11 @@ test('the wider rail keeps the tiles filling the panel and its own controls whol
         `${frame.controls[0].width.toFixed(2)}, gaps ` +
         `${gaps.map((gap) => gap.toFixed(1)).join('/')}, tiles ` +
         `${(border.width * 100).toFixed(1)}%/${(border.height * 100).toFixed(1)}% of the panel, ` +
-        `glyph ${(glyphShare * 100).toFixed(1)}% of the control`
+        `glyph ${(glyphShare * 100).toFixed(1)}% of the control, ` +
+        `gutters edge→tile ${edgeToTile.toFixed(2)}, ` +
+        `tile→tile ${betweenTiles.map((gap) => gap.toFixed(2)).join('/')}, ` +
+        `grid→control ${gridToControl.toFixed(2)}, ` +
+        `control→edge ${controlToEdge.toFixed(2)}, title→tile ${titleToTile.toFixed(2)}`
     );
 
     // The D30 contract, unchanged and re-run: the wider column may not be paid
@@ -2749,12 +2811,41 @@ test('the wider rail keeps the tiles filling the panel and its own controls whol
     expectTilesFillContent(geometry, detail);
     expectPanelCoverage(geometry, detail);
 
-    // The column: 96px, not a viewport share, and wholly on screen.
+    // The column: 112px, not a viewport share, and wholly on screen.
     expect(railBox.width, detail).toBeGreaterThanOrEqual(RAIL_COLUMN_WIDTH - TOLERANCE);
     expect(railBox.width, detail).toBeLessThanOrEqual(RAIL_COLUMN_WIDTH + TOLERANCE);
     expect(railBox.left, detail).toBeGreaterThanOrEqual(0);
     expect(railBox.right, detail).toBeLessThanOrEqual(frame.innerWidth);
     expect(railBox.bottom, detail).toBeLessThanOrEqual(frame.innerHeight);
+
+    // The five horizontal gutters, each one `--gap` (16px). The first row is the
+    // row the intra-row loop reads, and one tile in it would make that loop
+    // vacuous, so the row is guarded before the gaps are asserted.
+    expect(firstRow.length, gutterDetail).toBeGreaterThan(1);
+    expect(
+      Math.abs(edgeToTile - GUTTER),
+      `the edge → first tile gutter is not ${GUTTER}px — ${gutterDetail}`
+    ).toBeLessThanOrEqual(GUTTER_TOLERANCE);
+    for (const [index, gap] of betweenTiles.entries()) {
+      expect(
+        Math.abs(gap - GUTTER),
+        `the tile ${index} → tile ${index + 1} gutter is not ${GUTTER}px — ${gutterDetail}`
+      ).toBeLessThanOrEqual(GUTTER_TOLERANCE);
+    }
+    expect(
+      Math.abs(gridToControl - GUTTER),
+      `the grid → rail control gutter is not ${GUTTER}px — ${gutterDetail}`
+    ).toBeLessThanOrEqual(GUTTER_TOLERANCE);
+    expect(
+      Math.abs(controlToEdge - GUTTER),
+      `the rail control → screen edge gutter is not ${GUTTER}px — ${gutterDetail}`
+    ).toBeLessThanOrEqual(GUTTER_TOLERANCE);
+    // The title sits in the header, not the grid, so this is a same-inset check
+    // rather than a gap: `.product`'s left edge lines up with the first tile's.
+    expect(
+      titleToTile,
+      `the title does not line up with the first tile — ${gutterDetail}`
+    ).toBeLessThanOrEqual(GUTTER_TOLERANCE);
 
     for (const [index, control] of frame.controls.entries()) {
       const boxDetail = `${detail}; control ${index} ${JSON.stringify(control)}`;

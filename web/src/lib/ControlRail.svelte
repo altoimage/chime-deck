@@ -86,11 +86,19 @@
 
 <style>
   .rail {
-    /* One rail control plus one --gap-sm of inline padding either side is
-       80 + 2 * 8 = 96px at ui.scale 100%. The gutters are the deliberate gap
-       between the control and the column edge; the column still follows
-       --rail-control under ui.scale. A fixed column, not shrink-to-fit. */
-    --rail-column: calc(var(--rail-control) + 2 * var(--gap-sm));
+    /*
+     * The column is derived from one control plus one 16px gutter either side —
+     * 80 + 2 * 16 = 112px at ui.scale 100% — not a guessed width. Those two
+     * gutters are the two horizontal gaps the owner asked for: the inline-start
+     * one is the 16px between the grid's right edge and the control's left
+     * edge (`.content` deliberately has no inline-end padding, so this is the
+     * only place that gutter is spent), and the inline-end one is the 16px
+     * between the control's right edge and the screen edge. They are the same
+     * `--gap` as the tile gutters, so the page has one horizontal number
+     * instead of four. The column still follows --rail-control under ui.scale,
+     * and is a fixed column, not shrink-to-fit.
+     */
+    --rail-column: calc(var(--rail-control) + 2 * var(--gap));
     display: flex;
     flex: none;
     flex-direction: column;
@@ -99,7 +107,7 @@
     gap: var(--gap);
     width: var(--rail-column);
     max-height: 100%;
-    padding: 0 var(--gap-sm);
+    padding: 0 var(--gap);
     overflow: hidden;
     /* The controls ask how tall the column is (`cqh` below). The rail's height
        is already the stretched height of `.body`, i.e. definite, so size

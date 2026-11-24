@@ -156,6 +156,15 @@
     width: 100%;
   }
 
+  /*
+   * The header spends the same 16px gutter as the tile grid, so `.product`
+   * shares its left edge with the first tile and the header's right-hand
+   * content shares its right edge with the rail control. The horizontal
+   * gutter used to be `clamp(var(--gap), 3vw, calc(var(--gap) * 2))`, which
+   * is 32px at 1280 — that is why the title never lined up with the grid. The
+   * vertical padding is the same token now, so no ad-hoc `1.6vh` value is left
+   * in the dashboard.
+   */
   .header {
     display: flex;
     flex-wrap: wrap;
@@ -164,7 +173,7 @@
     gap: var(--gap);
     width: 100%;
     min-height: var(--tap-primary);
-    padding: clamp(8px, 1.6vh, var(--gap)) clamp(var(--gap), 3vw, calc(var(--gap) * 2));
+    padding: var(--gap);
   }
 
   .product {
@@ -196,7 +205,18 @@
     flex-direction: column;
     min-height: 0;
     min-width: 0;
-    padding: clamp(12px, 2.4vh, 48px) clamp(16px, 4vw, 48px);
+    /*
+     * cd-bdjz, the owner's ruling: every horizontal gutter is 16px — one
+     * `--gap` — and the rail's width is derived from it. The inline-start 16px
+     * is the gutter from the screen edge to the first tile. The inline-end 0 is
+     * not a missing gutter: the 16px between the grid's right edge and the rail
+     * control is the rail's own inline padding (see ControlRail.svelte), and
+     * counting it here as well would spend the width twice and take 16px off
+     * every tile. The vertical padding is the same token, replacing
+     * `clamp(12px, 2.4vh, 48px)`.
+     */
+    padding-block: var(--gap);
+    padding-inline: var(--gap) 0;
     /*
      * A hidden internal scroller is the safety valve for a pathological tile
      * count; normal configurations fit the panel without it. The three-
